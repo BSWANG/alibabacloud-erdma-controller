@@ -47,6 +47,7 @@ type Linux struct {
 
 type Config struct {
 	Annotations map[string]string `json:"annotations"`
+	SecurityContext
 }
 
 type RuntimeSpec struct {
@@ -87,6 +88,7 @@ func getPodConfig(pod k8sType.NamespacedName) (*podConfig, error) {
 		config := &podConfig{
 			Netns: fmt.Sprintf("/proc/%d/ns/net", sandboxInfo.State.Pid),
 		}
+
 		if sandboxInfo.Config == nil || sandboxInfo.Config.Labels == nil {
 			return config, nil
 		}
@@ -125,6 +127,11 @@ func getPodConfig(pod k8sType.NamespacedName) (*podConfig, error) {
 		return nil, fmt.Errorf("failed to parse sandbox info: %v", err)
 	}
 	var podConfig podConfig
+	if sbStatus.Status != nil && sbStatus.Status.Linux != nil && sbStatus.Status.Linux.Namespaces != nil &&
+		sbStatus.Status.Linux.Namespaces.Options != nil && sbStatus.Status.Linux.Namespaces.Options.Network == runtimeapi.NamespaceMode_NODE {
+		podConfig.Netns = "/proc/1/ns/net"
+		return &podConfig, nil
+	}
 	netns, ok := lo.Find(sbSpec.RuntimeSpec.Linux.Namespaces, func(item Namespace) bool {
 		return item.Type == "network"
 	})
