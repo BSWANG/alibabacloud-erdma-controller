@@ -37,8 +37,7 @@ func (d *DefaultDriver) Install() error {
 		}
 	}
 	execMethod := nodeExec()
-	_, err := execMethod("if [ -f /sys/module/erdma/parameters/compat_mode ] && [ \"Y\" == $(cat /sys/module/erdma/parameters/compat_mode) ]; then rmmod erdma &&  modprobe erdma compat_mode=N; else modprobe erdma compat_mode=N; fi")
-	if err != nil {
+	if err := ensureErdmaModule(execMethod, "N"); err != nil {
 		return fmt.Errorf("install erdma driver failed: %v", err)
 	}
 	return EnsureSMCR(execMethod)
