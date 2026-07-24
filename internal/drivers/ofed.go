@@ -30,13 +30,7 @@ func (d *OFEDDriver) Install() error {
 			return err
 		}
 	}
-	_, err := execMethod("if [ -f /sys/module/erdma/parameters/compat_mode ] && [ \"N\" == $(cat /sys/module/erdma/parameters/compat_mode) ]; then rmmod erdma && modprobe erdma compat_mode=Y; else modprobe erdma compat_mode=Y; fi")
-	if err != nil {
-		return fmt.Errorf("install erdma driver failed: %v", err)
-	}
-
-	_, err = execMethod("modprobe erdma")
-	if err != nil {
+	if err := ensureErdmaModule(execMethod, "Y"); err != nil {
 		return fmt.Errorf("install erdma driver failed: %v", err)
 	}
 	loadNvidiaPeermem(execMethod)

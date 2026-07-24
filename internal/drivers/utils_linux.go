@@ -140,6 +140,26 @@ func loadNvidiaPeermem(exec func(string) (string, error)) {
 	driverLog.Info("nvidia-peermem loaded for GPUDirect RDMA")
 }
 
+// ensureErdmaModule makes sure the erdma kernel module is loaded with the
+// requested compat_mode ("Y" or "N"). It reloads the module whenever the
+// currently loaded one does not match the request. This crucially covers the
+// case where an in-box erdma (the kernel-bundled module, which does not expose
+// the compat_mode parameter) was auto-loaded at boot and shadows the
+// installer/DKMS module: a plain `modprobe` would then be a no-op, leaving the
+// wrong module loaded — it presents a virtual device with no NUMA node and the
+// probe later fails. Removing it first forces modprobe to load the installer
+// module (which takes precedence via updates/dkms in modules.dep).
+func ensureErdmaModule(exec func(string) (string, error), compatMode string) error {
+	// rmmod when: module is loaded AND (compat_mode param absent -> wrong
+	// module, or present but not the requested value). Then always modprobe
+	// with the requested compat_mode.
+	script := fmt.Sprintf(`cm=/sys/module/erdma/parameters/compat_mode; `+
+		`if [ -d /sys/module/erdma ] && { [ ! -f "$cm" ] || [ "%[1]s" != "$(cat "$cm")" ]; }; then rmmod erdma; fi; `+
+		`modprobe erdma compat_mode=%[1]s`, compatMode)
+	_, err := exec(script)
+	return err
+}
+
 func EnsureSMCR(exec func(string) (string, error)) error {
 	_, err := exec("modprobe smc")
 	if err != nil {
@@ -272,6 +292,13 @@ func GetERDMANumaNode(info *netlink.RdmaLink) (int64, error) {
 	devNumaPath := path.Join("/sys/class/infiniband/", info.Attrs.Name, "device/numa_node")
 	numaStr, err := os.ReadFile(devNumaPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Virtual (non-PCI) devices expose no numa_node; treat as node 0,
+			// consistent with the negative-value clamp below. Erroring here
+			// would bubble up through ProbeDevice and panic the agent.
+			driverLog.Info("no numa_node for device, defaulting to numa 0", "device", info.Attrs.Name)
+			return 0, nil
+		}
 		return -1, fmt.Errorf("failed to get numa node for %s: %v", info.Attrs.Name, err)
 	}
 	numaStr = bytes.Trim(numaStr, "\n")
