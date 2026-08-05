@@ -18,5 +18,7 @@ data:
       "smcInitImage": "{{ .Values.config.smcInitImage }}",
       "enableInitContainerInject": {{ .Values.config.enableInitContainerInject }},
       "localERIDiscovery": {{ .Values.config.localERIDiscovery }},
+      "nodeMaxConcurrentReconciles": {{ .Values.config.nodeMaxConcurrentReconciles }},
+      "erdmaDeviceMaxConcurrentReconciles": {{ .Values.config.erdmaDeviceMaxConcurrentReconciles }},
       "nodeSelector": {{ .Values.nodeSelector | toJson }}
     }

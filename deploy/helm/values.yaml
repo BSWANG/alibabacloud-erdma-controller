@@ -66,6 +66,10 @@ config:
   enableInitContainerInject: true
   smcInitImage: ""
   localERIDiscovery: false
+  # Concurrent Node reconciles create ERIs through ECS OpenAPI.
+  nodeMaxConcurrentReconciles: 5
+  # Concurrent ERdmaDevice reconciles attach and configure ERIs.
+  erdmaDeviceMaxConcurrentReconciles: 10
 
 credentials:
   type: ""

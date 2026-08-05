@@ -8,6 +8,7 @@ import (
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/types"
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -35,9 +36,10 @@ const (
 // NodeReconciler reconciles a ERdmaDevice object
 type NodeReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	EriClient  *EriClient
-	CtrlConfig *types.Config
+	Scheme                  *runtime.Scheme
+	EriClient               *EriClient
+	CtrlConfig              *types.Config
+	MaxConcurrentReconciles int
 
 	// taggedENIs tracks which ENIs have already been backfilled with the
 	// terway-compat tags during this controller process lifetime, so that
@@ -49,6 +51,7 @@ type NodeReconciler struct {
 // +kubebuilder:rbac:groups=network.alibabacloud.com,resources=erdmadevices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=network.alibabacloud.com,resources=erdmadevices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=network.alibabacloud.com,resources=erdmadevices/finalizers,verbs=update
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -71,17 +74,28 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		erdmaLogger.Error(err, "Failed to get node")
 		return ctrl.Result{}, err
 	}
+	if !r.OwnNode(&node) {
+		return ctrl.Result{}, nil
+	}
 	if !node.GetDeletionTimestamp().IsZero() {
 		return RemoveERdmaDevices(r.Client, ctx, req.Name)
 	}
 	if !isNodeReady(&node) {
-		timeout := time.Duration(r.CtrlConfig.WaitNodeReadyTimeoutSeconds) * time.Second
-		elapsed := time.Since(node.CreationTimestamp.Time)
-		if elapsed < timeout {
-			erdmaLogger.Info("Node is not ready, waiting", "node", req.Name, "elapsed", elapsed)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		leaseReady, err := r.hasFreshNodeLease(ctx, &node, time.Now())
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-		erdmaLogger.Info("Node is not ready but timeout exceeded, proceeding", "node", req.Name, "elapsed", elapsed)
+		if leaseReady {
+			erdmaLogger.Info("Node lease is active, proceeding before node is ready", "node", req.Name)
+		} else {
+			timeout := time.Duration(r.CtrlConfig.WaitNodeReadyTimeoutSeconds) * time.Second
+			elapsed := time.Since(node.CreationTimestamp.Time)
+			if elapsed < timeout {
+				erdmaLogger.Info("Node is not ready, waiting", "node", req.Name, "elapsed", elapsed)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			erdmaLogger.Info("Node is not ready but timeout exceeded, proceeding", "node", req.Name, "elapsed", elapsed)
+		}
 	}
 
 	erdmaLogger.WithValues("node", req).Info("Node Added")
@@ -242,6 +256,30 @@ func isNodeReady(node *v1.Node) bool {
 	return false
 }
 
+func (r *NodeReconciler) hasFreshNodeLease(ctx context.Context, node *v1.Node, now time.Time) (bool, error) {
+	lease := &coordinationv1.Lease{}
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: v1.NamespaceNodeLease, Name: node.Name}, lease)
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return isFreshNodeLease(lease, now), nil
+}
+
+func isFreshNodeLease(lease *coordinationv1.Lease, now time.Time) bool {
+	if lease == nil || lease.Namespace != v1.NamespaceNodeLease ||
+		lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != lease.Name ||
+		lease.Spec.RenewTime == nil || lease.Spec.LeaseDurationSeconds == nil ||
+		*lease.Spec.LeaseDurationSeconds <= 0 {
+		return false
+	}
+
+	expiresAt := lease.Spec.RenewTime.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second)
+	return now.Before(expiresAt)
+}
+
 func (r *NodeReconciler) OwnNode(node *v1.Node) bool {
 	if node == nil {
 		return false
@@ -275,7 +313,7 @@ func (r *NodeReconciler) PredictNodeUpdate(oldNode, newNode *v1.Node) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	pred := predicate.TypedFuncs[*v1.Node]{
+	nodePred := predicate.TypedFuncs[*v1.Node]{
 		CreateFunc: func(e event.TypedCreateEvent[*v1.Node]) bool {
 			return r.OwnNode(e.Object)
 		},
@@ -289,9 +327,28 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return r.OwnNode(e.Object)
 		},
 	}
-	c, err := controller.New("node-controller", mgr, controller.Options{Reconciler: r})
+	c, err := controller.New("node-controller", mgr, controller.Options{
+		Reconciler:              r,
+		MaxConcurrentReconciles: r.MaxConcurrentReconciles,
+	})
 	if err != nil {
 		return err
 	}
-	return c.Watch(source.Kind(mgr.GetCache(), &v1.Node{}, &handler.TypedEnqueueRequestForObject[*v1.Node]{}, pred))
+	if err := c.Watch(source.Kind(mgr.GetCache(), &v1.Node{}, &handler.TypedEnqueueRequestForObject[*v1.Node]{}, nodePred)); err != nil {
+		return err
+	}
+
+	leasePred := predicate.TypedFuncs[*coordinationv1.Lease]{
+		CreateFunc: func(e event.TypedCreateEvent[*coordinationv1.Lease]) bool {
+			return isFreshNodeLease(e.Object, time.Now())
+		},
+		UpdateFunc: func(e event.TypedUpdateEvent[*coordinationv1.Lease]) bool {
+			now := time.Now()
+			return !isFreshNodeLease(e.ObjectOld, now) && isFreshNodeLease(e.ObjectNew, now)
+		},
+	}
+	leaseToNode := handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, lease *coordinationv1.Lease) []ctrl.Request {
+		return []ctrl.Request{{NamespacedName: k8stypes.NamespacedName{Name: lease.Name}}}
+	})
+	return c.Watch(source.Kind(mgr.GetCache(), &coordinationv1.Lease{}, leaseToNode, leasePred))
 }

@@ -8,6 +8,7 @@ import (
 	networkv1 "github.com/AliyunContainerService/alibabacloud-erdma-controller/api/v1"
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/types"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -127,6 +128,77 @@ func TestIsNodeReady(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isNodeReady(tt.node); got != tt.expected {
 				t.Errorf("isNodeReady() = %v, expected %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsFreshNodeLease(t *testing.T) {
+	now := time.Now()
+	holder := "node1"
+	duration := int32(40)
+	freshRenewTime := metav1.NewMicroTime(now.Add(-10 * time.Second))
+	staleRenewTime := metav1.NewMicroTime(now.Add(-time.Minute))
+
+	tests := []struct {
+		name     string
+		lease    *coordinationv1.Lease
+		expected bool
+	}{
+		{
+			name: "fresh kubelet lease",
+			lease: &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: holder, Namespace: v1.NamespaceNodeLease},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       &holder,
+					LeaseDurationSeconds: &duration,
+					RenewTime:            &freshRenewTime,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "expired kubelet lease",
+			lease: &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: holder, Namespace: v1.NamespaceNodeLease},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       &holder,
+					LeaseDurationSeconds: &duration,
+					RenewTime:            &staleRenewTime,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "non-node lease",
+			lease: &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: holder, Namespace: "default"},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       &holder,
+					LeaseDurationSeconds: &duration,
+					RenewTime:            &freshRenewTime,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "holder does not match node name",
+			lease: &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: "node2", Namespace: v1.NamespaceNodeLease},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       &holder,
+					LeaseDurationSeconds: &duration,
+					RenewTime:            &freshRenewTime,
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isFreshNodeLease(tt.lease, now); got != tt.expected {
+				t.Errorf("isFreshNodeLease() = %v, expected %v", got, tt.expected)
 			}
 		})
 	}
@@ -314,6 +386,8 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 	tests := []struct {
 		name            string
 		node            *v1.Node
+		lease           *coordinationv1.Lease
+		nodeSelector    map[string]string
 		expectRequeue   bool
 		expectRequeueAt time.Duration
 		expectErr       bool
@@ -333,6 +407,57 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 			},
 			expectRequeue:   true,
 			expectRequeueAt: 30 * time.Second,
+		},
+		{
+			name: "fresh lease does not bypass node selector",
+			node: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "unselected-node",
+					CreationTimestamp: metav1.Now(),
+				},
+			},
+			lease: func() *coordinationv1.Lease {
+				holder := "unselected-node"
+				duration := int32(40)
+				renewTime := metav1.NewMicroTime(time.Now())
+				return &coordinationv1.Lease{
+					ObjectMeta: metav1.ObjectMeta{Name: holder, Namespace: v1.NamespaceNodeLease},
+					Spec: coordinationv1.LeaseSpec{
+						HolderIdentity:       &holder,
+						LeaseDurationSeconds: &duration,
+						RenewTime:            &renewTime,
+					},
+				}
+			}(),
+			nodeSelector: map[string]string{"selected": "true"},
+		},
+		{
+			name: "NotReady with fresh lease proceeds",
+			node: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node-with-lease",
+					CreationTimestamp: metav1.Now(),
+				},
+				Status: v1.NodeStatus{
+					Conditions: []v1.NodeCondition{
+						{Type: v1.NodeReady, Status: v1.ConditionFalse},
+					},
+				},
+			},
+			lease: func() *coordinationv1.Lease {
+				holder := "node-with-lease"
+				duration := int32(40)
+				renewTime := metav1.NewMicroTime(time.Now())
+				return &coordinationv1.Lease{
+					ObjectMeta: metav1.ObjectMeta{Name: holder, Namespace: v1.NamespaceNodeLease},
+					Spec: coordinationv1.LeaseSpec{
+						HolderIdentity:       &holder,
+						LeaseDurationSeconds: &duration,
+						RenewTime:            &renewTime,
+					},
+				}
+			}(),
+			expectErr: true,
 		},
 		{
 			name: "NotReady timeout exceeded proceeds",
@@ -368,9 +493,13 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{tt.node}
+			if tt.lease != nil {
+				objects = append(objects, tt.lease)
+			}
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(tt.node).
+				WithObjects(objects...).
 				Build()
 
 			r := &NodeReconciler{
@@ -379,6 +508,7 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 				EriClient: &EriClient{},
 				CtrlConfig: &types.Config{
 					WaitNodeReadyTimeoutSeconds: 300,
+					NodeSelector:                tt.nodeSelector,
 				},
 			}
 

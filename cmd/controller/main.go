@@ -160,19 +160,21 @@ func main() {
 	}
 
 	if err = (&controller.ERdmaDeviceReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		EriClient: eriClient,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		EriClient:               eriClient,
+		MaxConcurrentReconciles: config.GetConfig().ERdmaDeviceMaxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ERdmaDevice")
 		os.Exit(1)
 	}
 
 	if err = (&controller.NodeReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		EriClient:  eriClient,
-		CtrlConfig: config.GetConfig(),
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		EriClient:               eriClient,
+		CtrlConfig:              config.GetConfig(),
+		MaxConcurrentReconciles: config.GetConfig().NodeMaxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Node")
 		os.Exit(1)

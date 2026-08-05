@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	defaultConfigPath     = "/etc/erdma-controller/config.json"
-	defaultCredentialPath = "/etc/erdma-controller-credential/credential.json"
-	regionIDAddr          = "http://100.100.100.200/latest/meta-data/region-id"
+	defaultConfigPath                         = "/etc/erdma-controller/config.json"
+	defaultCredentialPath                     = "/etc/erdma-controller-credential/credential.json"
+	regionIDAddr                              = "http://100.100.100.200/latest/meta-data/region-id"
+	defaultNodeMaxConcurrentReconciles        = 5
+	defaultERdmaDeviceMaxConcurrentReconciles = 10
 )
 
 var configLog = ctrl.Log.WithName("config")
@@ -73,6 +75,12 @@ func parseConfig(configPath string) (*types.Config, error) {
 	}
 	if erdmaConfig.WaitNodeReadyTimeoutSeconds == 0 {
 		erdmaConfig.WaitNodeReadyTimeoutSeconds = 300
+	}
+	if erdmaConfig.NodeMaxConcurrentReconciles <= 0 {
+		erdmaConfig.NodeMaxConcurrentReconciles = defaultNodeMaxConcurrentReconciles
+	}
+	if erdmaConfig.ERdmaDeviceMaxConcurrentReconciles <= 0 {
+		erdmaConfig.ERdmaDeviceMaxConcurrentReconciles = defaultERdmaDeviceMaxConcurrentReconciles
 	}
 	if erdmaConfig.Region == "" {
 		configLog.Info("region is not set, try to get region from metaserver")
