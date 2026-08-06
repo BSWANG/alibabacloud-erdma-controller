@@ -15,6 +15,7 @@ type Config struct {
 	WaitNodeReadyTimeoutSeconds        int               `json:"waitNodeReadyTimeoutSeconds"`
 	NodeMaxConcurrentReconciles        int               `json:"nodeMaxConcurrentReconciles"`
 	ERdmaDeviceMaxConcurrentReconciles int               `json:"erdmaDeviceMaxConcurrentReconciles"`
+	RateLimit                          map[string]int    `json:"rateLimit"`
 }
 
 type Sensitive string

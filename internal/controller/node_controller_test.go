@@ -10,12 +10,15 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestNodeReconciler_OwnNode(t *testing.T) {
@@ -201,6 +204,49 @@ func TestIsFreshNodeLease(t *testing.T) {
 				t.Errorf("isFreshNodeLease() = %v, expected %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestHasFreshNodeLeaseUsesAPIReader(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+
+	now := time.Now()
+	holder := "node1"
+	duration := int32(40)
+	renewTime := metav1.NewMicroTime(now)
+	node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: holder, UID: "node-uid"}}
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      holder,
+			Namespace: v1.NamespaceNodeLease,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "Node",
+				Name:       holder,
+				UID:        node.UID,
+			}},
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &holder,
+			LeaseDurationSeconds: &duration,
+			RenewTime:            &renewTime,
+		},
+	}
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build()
+	r := &NodeReconciler{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		APIReader: apiReader,
+	}
+
+	fresh, err := r.hasFreshNodeLease(context.Background(), node, now)
+	if err != nil {
+		t.Fatalf("hasFreshNodeLease() error = %v", err)
+	}
+	if !fresh {
+		t.Fatal("hasFreshNodeLease() = false, want true")
 	}
 }
 
@@ -390,7 +436,6 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 		nodeSelector    map[string]string
 		expectRequeue   bool
 		expectRequeueAt time.Duration
-		expectErr       bool
 	}{
 		{
 			name: "NotReady within timeout requeues",
@@ -406,7 +451,7 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 				},
 			},
 			expectRequeue:   true,
-			expectRequeueAt: 30 * time.Second,
+			expectRequeueAt: nodeNotReadyRequeueAfter,
 		},
 		{
 			name: "fresh lease does not bypass node selector",
@@ -436,6 +481,7 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 			node: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "node-with-lease",
+					UID:               "node-with-lease-uid",
 					CreationTimestamp: metav1.Now(),
 				},
 				Status: v1.NodeStatus{
@@ -449,7 +495,16 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 				duration := int32(40)
 				renewTime := metav1.NewMicroTime(time.Now())
 				return &coordinationv1.Lease{
-					ObjectMeta: metav1.ObjectMeta{Name: holder, Namespace: v1.NamespaceNodeLease},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      holder,
+						Namespace: v1.NamespaceNodeLease,
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "v1",
+							Kind:       "Node",
+							Name:       holder,
+							UID:        "node-with-lease-uid",
+						}},
+					},
 					Spec: coordinationv1.LeaseSpec{
 						HolderIdentity:       &holder,
 						LeaseDurationSeconds: &duration,
@@ -457,7 +512,45 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 					},
 				}
 			}(),
-			expectErr: true,
+		},
+		{
+			name: "NotReady with stale lease owner requeues",
+			node: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node-with-stale-lease",
+					UID:               "current-node-uid",
+					CreationTimestamp: metav1.Now(),
+				},
+				Status: v1.NodeStatus{
+					Conditions: []v1.NodeCondition{
+						{Type: v1.NodeReady, Status: v1.ConditionFalse},
+					},
+				},
+			},
+			lease: func() *coordinationv1.Lease {
+				holder := "node-with-stale-lease"
+				duration := int32(40)
+				renewTime := metav1.NewMicroTime(time.Now())
+				return &coordinationv1.Lease{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      holder,
+						Namespace: v1.NamespaceNodeLease,
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: "v1",
+							Kind:       "Node",
+							Name:       holder,
+							UID:        "previous-node-uid",
+						}},
+					},
+					Spec: coordinationv1.LeaseSpec{
+						HolderIdentity:       &holder,
+						LeaseDurationSeconds: &duration,
+						RenewTime:            &renewTime,
+					},
+				}
+			}(),
+			expectRequeue:   true,
+			expectRequeueAt: nodeNotReadyRequeueAfter,
 		},
 		{
 			name: "NotReady timeout exceeded proceeds",
@@ -472,7 +565,6 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 					},
 				},
 			},
-			expectErr: true,
 		},
 		{
 			name: "Ready node proceeds",
@@ -487,7 +579,6 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 					},
 				},
 			},
-			expectErr: true,
 		},
 	}
 
@@ -525,12 +616,57 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 				}
 				return
 			}
-			if tt.expectErr && err == nil {
-				t.Errorf("expected error from EriClient, got nil")
-			}
-			if result.RequeueAfter == 30*time.Second {
-				t.Errorf("should not have requeued with 30s delay")
+			if result.RequeueAfter == nodeNotReadyRequeueAfter {
+				t.Errorf("should not have requeued with node-ready delay")
 			}
 		})
+	}
+}
+
+func TestNodeReconcilerMissingNodeIgnoresERdmaDeviceNotFound(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := networkv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add ERdmaDevice scheme: %v", err)
+	}
+
+	const nodeName = "missing-node"
+	device := &networkv1.ERdmaDevice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       nodeName,
+			Labels:     map[string]string{"alibabacloud.com/nodename": nodeName},
+			Finalizers: []string{"network.alibabacloud.com/erdma-controller"},
+		},
+	}
+	notFound := apierrors.NewNotFound(
+		schema.GroupResource{Group: networkv1.GroupVersion.Group, Resource: "erdmadevices"},
+		device.Name,
+	)
+	var patchCalled, deleteCalled bool
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(device).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				patchCalled = true
+				return notFound
+			},
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				deleteCalled = true
+				return notFound
+			},
+		}).
+		Build()
+
+	reconciler := &NodeReconciler{Client: fakeClient}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: nodeName},
+	}); err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
+	}
+	if !patchCalled || !deleteCalled {
+		t.Fatalf("cleanup calls: patch=%t delete=%t, want both true", patchCalled, deleteCalled)
 	}
 }

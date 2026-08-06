@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 
 	networkv1 "github.com/AliyunContainerService/alibabacloud-erdma-controller/api/v1"
+	aliyunclient "github.com/AliyunContainerService/alibabacloud-erdma-controller/pkg/aliyun/client"
 	"github.com/alibabacloud-go/endpoint-util/service"
 	"github.com/alibabacloud-go/tea/tea"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,7 +39,7 @@ const (
 )
 
 type EriClient struct {
-	client          *ecs.Client
+	client          *aliyunclient.ECSService
 	regionID        string
 	ManagedNonOwned bool
 }
@@ -70,11 +72,14 @@ func NewEriClient(k8sClient client.Client) (*EriClient, error) {
 	return &EriClient{
 		regionID:        config.GetConfig().Region,
 		ManagedNonOwned: config.GetConfig().ManageNonOwnedERIs,
-		client:          client,
+		client: aliyunclient.NewECSService(
+			client,
+			aliyunclient.NewRateLimiter(aliyunclient.FromMap(config.GetConfig().RateLimit)),
+		),
 	}, nil
 }
 
-func (e *EriClient) InstanceIDFromNode(node *corev1.Node) (string, error) {
+func (e *EriClient) InstanceIDFromNode(ctx context.Context, node *corev1.Node) (string, error) {
 	var instanceID string
 	if node.Spec.ProviderID != "" {
 		providerIDs := strings.Split(node.Spec.ProviderID, ".")
@@ -83,7 +88,7 @@ func (e *EriClient) InstanceIDFromNode(node *corev1.Node) (string, error) {
 		}
 	}
 	if instanceID != "" {
-		resp, err := e.client.DescribeInstances(&ecs.DescribeInstancesRequest{
+		resp, err := e.client.DescribeInstances(ctx, &ecs.DescribeInstancesRequest{
 			RegionId:    ptr.To(e.regionID),
 			InstanceIds: ptr.To(fmt.Sprintf("[\"%s\"]", instanceID)),
 		})
@@ -102,7 +107,7 @@ func (e *EriClient) InstanceIDFromNode(node *corev1.Node) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("cannot found instance from node internal ip")
 	}
-	resp, err := e.client.DescribeInstances(&ecs.DescribeInstancesRequest{
+	resp, err := e.client.DescribeInstances(ctx, &ecs.DescribeInstancesRequest{
 		RegionId:           ptr.To(e.regionID),
 		PrivateIpAddresses: ptr.To(fmt.Sprintf("[\"%s\"]", internalIP.Address)),
 	})
@@ -118,8 +123,8 @@ func (e *EriClient) InstanceIDFromNode(node *corev1.Node) (string, error) {
 	return *resp.Body.Instances.Instance[0].InstanceId, nil
 }
 
-func (e *EriClient) CreateEriForInstance(instanceInfo *ecs.DescribeInstancesResponseBodyInstancesInstance, cardIndex []int, queuePair int) ([]*types.ERI, error) {
-	resp, err := e.client.DescribeNetworkInterfaces(&ecs.DescribeNetworkInterfacesRequest{
+func (e *EriClient) CreateEriForInstance(ctx context.Context, instanceInfo *ecs.DescribeInstancesResponseBodyInstancesInstance, cardIndex []int, queuePair int) ([]*types.ERI, error) {
+	resp, err := e.client.DescribeNetworkInterfaces(ctx, &ecs.DescribeNetworkInterfacesRequest{
 		RegionId: ptr.To(e.regionID),
 		Tag: []*ecs.DescribeNetworkInterfacesRequestTag{{
 			Key:   ptr.To(eriTagCreatorKey),
@@ -147,7 +152,7 @@ func (e *EriClient) CreateEriForInstance(instanceInfo *ecs.DescribeInstancesResp
 		}
 	}
 	for len(cardIndex) > 0 {
-		eriResp, err := e.client.CreateNetworkInterface(&ecs.CreateNetworkInterfaceRequest{
+		eriResp, err := e.client.CreateNetworkInterface(ctx, &ecs.CreateNetworkInterfaceRequest{
 			NetworkInterfaceName:        ptr.To(fmt.Sprintf("eri-%s-%d", *instanceInfo.InstanceId, cardIndex[0])),
 			NetworkInterfaceTrafficMode: ptr.To(trafficModeRDMA),
 			QueuePairNumber:             ptr.To(int32(queuePair)),
@@ -180,8 +185,8 @@ func (e *EriClient) CreateEriForInstance(instanceInfo *ecs.DescribeInstancesResp
 	return eris, nil
 }
 
-func (e *EriClient) ConvertPrimaryENI(primaryENI string, instanceID string, queuePair int) error {
-	if _, err := e.client.ModifyNetworkInterfaceAttribute(&ecs.ModifyNetworkInterfaceAttributeRequest{
+func (e *EriClient) ConvertPrimaryENI(ctx context.Context, primaryENI string, instanceID string, queuePair int) error {
+	if _, err := e.client.ModifyNetworkInterfaceAttribute(ctx, &ecs.ModifyNetworkInterfaceAttributeRequest{
 		RegionId:           ptr.To(e.regionID),
 		NetworkInterfaceId: ptr.To(primaryENI),
 		NetworkInterfaceTrafficConfig: &ecs.ModifyNetworkInterfaceAttributeRequestNetworkInterfaceTrafficConfig{
@@ -192,7 +197,7 @@ func (e *EriClient) ConvertPrimaryENI(primaryENI string, instanceID string, queu
 	}); err != nil {
 		return err
 	}
-	if err := e.EnsureEriTags([]string{primaryENI}, instanceID); err != nil {
+	if err := e.EnsureEriTags(ctx, []string{primaryENI}, instanceID); err != nil {
 		// Best-effort terway-compat tagging; not fatal to RDMA conversion.
 		eriLog.Info("WARNING: skipped terway-compat tags on primary ENI after RDMA convert (best-effort)", "eni", primaryENI, "error", err.Error())
 	}
@@ -207,7 +212,7 @@ func (e *EriClient) ConvertPrimaryENI(primaryENI string, instanceID string, queu
 // TagResources is idempotent on the cloud side: re-applying the same (key,value)
 // pair is a no-op, so this is safe to call repeatedly. instanceID may be empty,
 // in which case the instance-id tag is skipped.
-func (e *EriClient) EnsureEriTags(eniIDs []string, instanceID string) error {
+func (e *EriClient) EnsureEriTags(ctx context.Context, eniIDs []string, instanceID string) error {
 	if len(eniIDs) == 0 {
 		return nil
 	}
@@ -221,7 +226,7 @@ func (e *EriClient) EnsureEriTags(eniIDs []string, instanceID string) error {
 			Value: ptr.To(instanceID),
 		})
 	}
-	_, err := e.client.TagResources(&ecs.TagResourcesRequest{
+	_, err := e.client.TagResources(ctx, &ecs.TagResourcesRequest{
 		RegionId:     ptr.To(e.regionID),
 		ResourceType: ptr.To(eniResourceType),
 		ResourceId:   lo.Map(eniIDs, func(id string, _ int) *string { return ptr.To(id) }),
@@ -233,8 +238,8 @@ func (e *EriClient) EnsureEriTags(eniIDs []string, instanceID string) error {
 	return nil
 }
 
-func (e *EriClient) SelectERIs(instanceID string) ([]*types.ERI, error) {
-	instanceResp, err := e.client.DescribeInstances(&ecs.DescribeInstancesRequest{
+func (e *EriClient) SelectERIs(ctx context.Context, instanceID string) ([]*types.ERI, error) {
+	instanceResp, err := e.client.DescribeInstances(ctx, &ecs.DescribeInstancesRequest{
 		RegionId:    ptr.To(e.regionID),
 		InstanceIds: ptr.To(fmt.Sprintf("[\"%s\"]", instanceID)),
 	})
@@ -244,7 +249,7 @@ func (e *EriClient) SelectERIs(instanceID string) ([]*types.ERI, error) {
 	if *instanceResp.Body.TotalCount == 0 {
 		return nil, fmt.Errorf("cannot found instance %s", instanceID)
 	}
-	instanceTypeResp, err := e.client.DescribeInstanceTypes(&ecs.DescribeInstanceTypesRequest{
+	instanceTypeResp, err := e.client.DescribeInstanceTypes(ctx, &ecs.DescribeInstanceTypesRequest{
 		InstanceTypes: []*string{
 			instanceResp.Body.Instances.Instance[0].InstanceType,
 		},
@@ -276,7 +281,7 @@ func (e *EriClient) SelectERIs(instanceID string) ([]*types.ERI, error) {
 		}
 	}
 
-	describeENIResponse, err := e.client.DescribeNetworkInterfaces(&ecs.DescribeNetworkInterfacesRequest{
+	describeENIResponse, err := e.client.DescribeNetworkInterfaces(ctx, &ecs.DescribeNetworkInterfacesRequest{
 		RegionId:   ptr.To(e.regionID),
 		InstanceId: ptr.To(instanceID),
 		PageSize:   ptr.To(int32(100)),
@@ -289,7 +294,7 @@ func (e *EriClient) SelectERIs(instanceID string) ([]*types.ERI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot generate eri config list from exist enis: %v", err)
 	}
-	eris, err := e.CreateEriForInstance(instanceResp.Body.Instances.Instance[0], needCreate, queuePairNumberConfig)
+	eris, err := e.CreateEriForInstance(ctx, instanceResp.Body.Instances.Instance[0], needCreate, queuePairNumberConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +304,7 @@ func (e *EriClient) SelectERIs(instanceID string) ([]*types.ERI, error) {
 	// pre-bound ENIs and ENIs created by older versions that only had two tags).
 	// Failure is non-fatal: ERDMA still works, terway compatibility is just
 	// degraded until the next reconcile retries.
-	if err := e.EnsureEriTags(lo.Map(selectEriList, func(item *types.ERI, _ int) string { return item.ID }), instanceID); err != nil {
+	if err := e.EnsureEriTags(ctx, lo.Map(selectEriList, func(item *types.ERI, _ int) string { return item.ID }), instanceID); err != nil {
 		eriLog.Info("WARNING: skipped terway-compat tags on selected ERIs (best-effort)", "instanceID", instanceID, "error", err.Error())
 	}
 	return selectEriList, nil
@@ -375,11 +380,11 @@ func (e *EriClient) SelectEriFromExist(existENIs []*ecs.DescribeNetworkInterface
 	return eriList, needCreateOrConvert, remainQueuePairCountPerCardIndex, nil
 }
 
-func (e *EriClient) EnsureEriForInstance(devices []networkv1.DeviceInfo) ([]networkv1.DeviceStatus, error) {
+func (e *EriClient) EnsureEriForInstance(ctx context.Context, devices []networkv1.DeviceInfo) ([]networkv1.DeviceStatus, error) {
 	eniIds := lo.Map(devices, func(item networkv1.DeviceInfo, _ int) *string {
 		return ptr.To(item.ID)
 	})
-	enis, err := e.client.DescribeNetworkInterfaces(&ecs.DescribeNetworkInterfacesRequest{
+	enis, err := e.client.DescribeNetworkInterfaces(ctx, &ecs.DescribeNetworkInterfacesRequest{
 		NetworkInterfaceId: eniIds,
 		PageSize:           ptr.To(int32(100)),
 		RegionId:           ptr.To(e.regionID),
@@ -417,7 +422,7 @@ func (e *EriClient) EnsureEriForInstance(devices []networkv1.DeviceInfo) ([]netw
 			if device.NetworkCardIndex != 0 {
 				req.NetworkCardIndex = ptr.To(int32(device.NetworkCardIndex))
 			}
-			_, err = e.client.AttachNetworkInterface(&req)
+			_, err = e.client.AttachNetworkInterface(ctx, &req)
 			if err != nil {
 				devStatus = append(devStatus, networkv1.DeviceStatus{
 					ID:      device.ID,
@@ -433,7 +438,7 @@ func (e *EriClient) EnsureEriForInstance(devices []networkv1.DeviceInfo) ([]netw
 			}
 		}
 		if device.IsPrimaryENI && *eniStatus.Status == types.ENIStatusInUse && *eniStatus.NetworkInterfaceTrafficMode != trafficModeRDMA {
-			err = e.ConvertPrimaryENI(device.ID, device.InstanceID, device.QueuePair)
+			err = e.ConvertPrimaryENI(ctx, device.ID, device.InstanceID, device.QueuePair)
 			if err != nil {
 				devStatus = append(devStatus, networkv1.DeviceStatus{
 					ID:      device.ID,
@@ -451,8 +456,8 @@ func (e *EriClient) EnsureEriForInstance(devices []networkv1.DeviceInfo) ([]netw
 	return devStatus, nil
 }
 
-func (e *EriClient) IsJumboFrameEnabled(instanceID string) (bool, error) {
-	resp, err := e.client.DescribeInstanceAttribute(&ecs.DescribeInstanceAttributeRequest{
+func (e *EriClient) IsJumboFrameEnabled(ctx context.Context, instanceID string) (bool, error) {
+	resp, err := e.client.DescribeInstanceAttribute(ctx, &ecs.DescribeInstanceAttributeRequest{
 		InstanceId: ptr.To(instanceID),
 	})
 	if err != nil {

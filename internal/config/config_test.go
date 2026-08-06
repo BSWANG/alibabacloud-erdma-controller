@@ -6,12 +6,14 @@ import (
 	"testing"
 )
 
-func TestParseConfigConcurrentReconcileSettings(t *testing.T) {
+func TestParseConfigControllerSettings(t *testing.T) {
 	tests := []struct {
-		name          string
-		config        string
-		expectedNode  int
-		expectedERdma int
+		name               string
+		config             string
+		expectedNode       int
+		expectedERdma      int
+		expectedLimitCount int
+		expectedPerMinute  int
 	}{
 		{
 			name:          "defaults when omitted",
@@ -20,13 +22,15 @@ func TestParseConfigConcurrentReconcileSettings(t *testing.T) {
 			expectedERdma: defaultERdmaDeviceMaxConcurrentReconciles,
 		},
 		{
-			name:          "uses explicit values",
-			config:        `{"region":"cn-test","nodeMaxConcurrentReconciles":3,"erdmaDeviceMaxConcurrentReconciles":7}`,
-			expectedNode:  3,
-			expectedERdma: 7,
+			name:               "uses per API limit",
+			config:             `{"region":"cn-test","nodeMaxConcurrentReconciles":3,"erdmaDeviceMaxConcurrentReconciles":7,"rateLimit":{"CreateNetworkInterface":600}}`,
+			expectedNode:       3,
+			expectedERdma:      7,
+			expectedLimitCount: 1,
+			expectedPerMinute:  600,
 		},
 		{
-			name:          "replaces non-positive values",
+			name:          "replaces non-positive concurrency values",
 			config:        `{"region":"cn-test","nodeMaxConcurrentReconciles":-1,"erdmaDeviceMaxConcurrentReconciles":0}`,
 			expectedNode:  defaultNodeMaxConcurrentReconciles,
 			expectedERdma: defaultERdmaDeviceMaxConcurrentReconciles,
@@ -49,6 +53,12 @@ func TestParseConfigConcurrentReconcileSettings(t *testing.T) {
 			}
 			if got.ERdmaDeviceMaxConcurrentReconciles != tt.expectedERdma {
 				t.Errorf("ERdmaDeviceMaxConcurrentReconciles = %d, want %d", got.ERdmaDeviceMaxConcurrentReconciles, tt.expectedERdma)
+			}
+			if len(got.RateLimit) != tt.expectedLimitCount {
+				t.Fatalf("len(RateLimit) = %d, want %d", len(got.RateLimit), tt.expectedLimitCount)
+			}
+			if tt.expectedLimitCount > 0 && got.RateLimit["CreateNetworkInterface"] != tt.expectedPerMinute {
+				t.Errorf("CreateNetworkInterface limit = %d, want %d", got.RateLimit["CreateNetworkInterface"], tt.expectedPerMinute)
 			}
 		})
 	}

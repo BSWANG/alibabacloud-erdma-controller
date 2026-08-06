@@ -79,7 +79,7 @@ func (r *ERdmaDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	eriStatus, err := r.EriClient.EnsureEriForInstance(device.Spec.Devices)
+	eriStatus, err := r.EriClient.EnsureEriForInstance(ctx, device.Spec.Devices)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
