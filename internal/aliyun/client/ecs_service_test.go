@@ -25,95 +25,96 @@ import (
 )
 
 type fakeECSAPI struct {
-	calls map[string]int
+	calls map[ecsOperation]int
 }
 
 func (f *fakeECSAPI) DescribeInstances(*ecs.DescribeInstancesRequest) (*ecs.DescribeInstancesResponse, error) {
-	f.calls[APIDescribeInstances]++
+	f.calls[ecsDescribeInstances]++
 	return &ecs.DescribeInstancesResponse{}, nil
 }
 
 func (f *fakeECSAPI) DescribeNetworkInterfaces(*ecs.DescribeNetworkInterfacesRequest) (*ecs.DescribeNetworkInterfacesResponse, error) {
-	f.calls[APIDescribeNetworkInterfaces]++
+	f.calls[ecsDescribeNetworkInterfaces]++
 	return &ecs.DescribeNetworkInterfacesResponse{}, nil
 }
 
 func (f *fakeECSAPI) CreateNetworkInterface(*ecs.CreateNetworkInterfaceRequest) (*ecs.CreateNetworkInterfaceResponse, error) {
-	f.calls[APICreateNetworkInterface]++
+	f.calls[ecsCreateNetworkInterface]++
 	return &ecs.CreateNetworkInterfaceResponse{}, nil
 }
 
 func (f *fakeECSAPI) ModifyNetworkInterfaceAttribute(*ecs.ModifyNetworkInterfaceAttributeRequest) (*ecs.ModifyNetworkInterfaceAttributeResponse, error) {
-	f.calls[APIModifyNetworkInterfaceAttribute]++
+	f.calls[ecsModifyNetworkInterfaceAttribute]++
 	return &ecs.ModifyNetworkInterfaceAttributeResponse{}, nil
 }
 
 func (f *fakeECSAPI) TagResources(*ecs.TagResourcesRequest) (*ecs.TagResourcesResponse, error) {
-	f.calls[APITagResources]++
+	f.calls[ecsTagResources]++
 	return &ecs.TagResourcesResponse{}, nil
 }
 
 func (f *fakeECSAPI) DescribeInstanceTypes(*ecs.DescribeInstanceTypesRequest) (*ecs.DescribeInstanceTypesResponse, error) {
-	f.calls[APIDescribeInstanceTypes]++
+	f.calls[ecsDescribeInstanceTypes]++
 	return &ecs.DescribeInstanceTypesResponse{}, nil
 }
 
 func (f *fakeECSAPI) AttachNetworkInterface(*ecs.AttachNetworkInterfaceRequest) (*ecs.AttachNetworkInterfaceResponse, error) {
-	f.calls[APIAttachNetworkInterface]++
+	f.calls[ecsAttachNetworkInterface]++
 	return &ecs.AttachNetworkInterfaceResponse{}, nil
 }
 
 func (f *fakeECSAPI) DescribeInstanceAttribute(*ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error) {
-	f.calls[APIDescribeInstanceAttribute]++
+	f.calls[ecsDescribeInstanceAttribute]++
 	return &ecs.DescribeInstanceAttributeResponse{}, nil
 }
 
 func TestECSServiceRateLimitsBeforeCallingSDK(t *testing.T) {
 	tests := []struct {
-		api  string
-		call func(context.Context, *ECSService) error
+		operation ecsOperation
+		call      func(context.Context, *ECSService) error
 	}{
-		{api: APIDescribeInstances, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsDescribeInstances, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.DescribeInstances(ctx, &ecs.DescribeInstancesRequest{})
 			return err
 		}},
-		{api: APIDescribeNetworkInterfaces, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsDescribeNetworkInterfaces, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.DescribeNetworkInterfaces(ctx, &ecs.DescribeNetworkInterfacesRequest{})
 			return err
 		}},
-		{api: APICreateNetworkInterface, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsCreateNetworkInterface, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.CreateNetworkInterface(ctx, &ecs.CreateNetworkInterfaceRequest{})
 			return err
 		}},
-		{api: APIModifyNetworkInterfaceAttribute, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsModifyNetworkInterfaceAttribute, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.ModifyNetworkInterfaceAttribute(ctx, &ecs.ModifyNetworkInterfaceAttributeRequest{})
 			return err
 		}},
-		{api: APITagResources, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsTagResources, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.TagResources(ctx, &ecs.TagResourcesRequest{})
 			return err
 		}},
-		{api: APIDescribeInstanceTypes, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsDescribeInstanceTypes, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.DescribeInstanceTypes(ctx, &ecs.DescribeInstanceTypesRequest{})
 			return err
 		}},
-		{api: APIAttachNetworkInterface, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsAttachNetworkInterface, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.AttachNetworkInterface(ctx, &ecs.AttachNetworkInterfaceRequest{})
 			return err
 		}},
-		{api: APIDescribeInstanceAttribute, call: func(ctx context.Context, client *ECSService) error {
+		{operation: ecsDescribeInstanceAttribute, call: func(ctx context.Context, client *ECSService) error {
 			_, err := client.DescribeInstanceAttribute(ctx, &ecs.DescribeInstanceAttributeRequest{})
 			return err
 		}},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.api, func(t *testing.T) {
-			rawClient := &fakeECSAPI{calls: map[string]int{}}
-			limiter := NewRateLimiter(LimitConfig{
-				tt.api: {QPS: 1, Burst: 1},
-			})
-			client := NewECSService(rawClient, limiter)
+		name := ecsOperationConfigs[tt.operation].name
+		t.Run(name, func(t *testing.T) {
+			rawClient := &fakeECSAPI{calls: map[ecsOperation]int{}}
+			client, err := NewECSService(rawClient, map[string]int{name: 1})
+			if err != nil {
+				t.Fatalf("NewECSService() error = %v", err)
+			}
 
 			if err := tt.call(context.Background(), client); err != nil {
 				t.Fatalf("first call error = %v", err)
@@ -123,8 +124,8 @@ func TestECSServiceRateLimitsBeforeCallingSDK(t *testing.T) {
 			if err := tt.call(ctx, client); !errors.Is(err, context.Canceled) {
 				t.Fatalf("second call error = %v, want context.Canceled", err)
 			}
-			if rawClient.calls[tt.api] != 1 {
-				t.Fatalf("SDK calls = %d, want 1", rawClient.calls[tt.api])
+			if rawClient.calls[tt.operation] != 1 {
+				t.Fatalf("SDK calls = %d, want 1", rawClient.calls[tt.operation])
 			}
 		})
 	}

@@ -637,7 +637,7 @@ func TestNodeReconcilerMissingNodeIgnoresERdmaDeviceNotFound(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       nodeName,
 			Labels:     map[string]string{"alibabacloud.com/nodename": nodeName},
-			Finalizers: []string{"network.alibabacloud.com/erdma-controller"},
+			Finalizers: []string{erdmaFinalizer, "example.com/foreign-finalizer"},
 		},
 	}
 	notFound := apierrors.NewNotFound(
@@ -649,8 +649,11 @@ func TestNodeReconcilerMissingNodeIgnoresERdmaDeviceNotFound(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(device).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				patchCalled = true
+				if finalizers := obj.GetFinalizers(); len(finalizers) != 1 || finalizers[0] != "example.com/foreign-finalizer" {
+					t.Errorf("finalizers after cleanup = %v, want only foreign finalizer", finalizers)
+				}
 				return notFound
 			},
 			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {

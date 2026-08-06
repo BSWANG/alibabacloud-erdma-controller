@@ -70,9 +70,10 @@ config:
   nodeMaxConcurrentReconciles: 5
   # Concurrent ERdmaDevice reconciles attach and configure ERIs. Defaults to 10 when omitted or zero.
   erdmaDeviceMaxConcurrentReconciles: 10
-  # Optional per-minute overrides; unspecified APIs use Terway defaults.
+  # Optional per-minute overrides for the ECS OpenAPIs used by this controller.
+  # Built-in defaults use one quarter of each ECS OpenAPI's documented quota.
   # rateLimit:
-  #   CreateNetworkInterface: 500
+  #   CreateNetworkInterface: 125
   rateLimit: {}
 
 credentials:

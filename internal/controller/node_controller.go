@@ -23,12 +23,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	networkv1 "github.com/AliyunContainerService/alibabacloud-erdma-controller/api/v1"
 )
 
-const nodeNotReadyRequeueAfter = 30 * time.Second
+const (
+	erdmaFinalizer           = "network.alibabacloud.com/erdma-controller"
+	nodeNotReadyRequeueAfter = 30 * time.Second
+)
 
 // NodeReconciler reconciles a ERdmaDevice object
 type NodeReconciler struct {
@@ -225,11 +229,11 @@ func RemoveERdmaDevices(erdmaClient client.Client, ctx context.Context, nodeName
 	// after the List is already the desired result.
 	for i := range erdmaDevices.Items {
 		device := &erdmaDevices.Items[i]
-		if len(device.Finalizers) == 0 {
+		if !controllerutil.ContainsFinalizer(device, erdmaFinalizer) {
 			continue
 		}
 		base := device.DeepCopy()
-		device.Finalizers = nil
+		controllerutil.RemoveFinalizer(device, erdmaFinalizer)
 		if err := erdmaClient.Patch(ctx, device, client.MergeFrom(base)); err != nil && !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}

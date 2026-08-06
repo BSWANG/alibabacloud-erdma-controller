@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	networkv1 "github.com/AliyunContainerService/alibabacloud-erdma-controller/api/v1"
-	aliyunclient "github.com/AliyunContainerService/alibabacloud-erdma-controller/pkg/aliyun/client"
+	aliyunclient "github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/aliyun/client"
 	"github.com/alibabacloud-go/endpoint-util/service"
 	"github.com/alibabacloud-go/tea/tea"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,13 +69,14 @@ func NewEriClient(k8sClient client.Client) (*EriClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	ecsService, err := aliyunclient.NewECSService(client, config.GetConfig().RateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("configure ECS OpenAPI rate limiter: %w", err)
+	}
 	return &EriClient{
 		regionID:        config.GetConfig().Region,
 		ManagedNonOwned: config.GetConfig().ManageNonOwnedERIs,
-		client: aliyunclient.NewECSService(
-			client,
-			aliyunclient.NewRateLimiter(aliyunclient.FromMap(config.GetConfig().RateLimit)),
-		),
+		client:          ecsService,
 	}, nil
 }
 
