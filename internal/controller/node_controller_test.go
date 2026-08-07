@@ -436,6 +436,7 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 		nodeSelector    map[string]string
 		expectRequeue   bool
 		expectRequeueAt time.Duration
+		expectECS       bool
 	}{
 		{
 			name: "NotReady within timeout requeues",
@@ -512,6 +513,7 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 					},
 				}
 			}(),
+			expectECS: true,
 		},
 		{
 			name: "NotReady with stale lease owner requeues",
@@ -565,6 +567,7 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 					},
 				},
 			},
+			expectECS: true,
 		},
 		{
 			name: "Ready node proceeds",
@@ -579,11 +582,13 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 					},
 				},
 			},
+			expectECS: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.node.Spec.ProviderID = "cn-hangzhou.i-test"
 			objects := []client.Object{tt.node}
 			if tt.lease != nil {
 				objects = append(objects, tt.lease)
@@ -592,11 +597,11 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 				WithScheme(scheme).
 				WithObjects(objects...).
 				Build()
-
+			api := &fakeEriAPI{}
 			r := &NodeReconciler{
 				Client:    fakeClient,
 				Scheme:    scheme,
-				EriClient: &EriClient{},
+				EriClient: &EriClient{client: api, regionID: "cn-hangzhou", ManagedNonOwned: true},
 				CtrlConfig: &types.Config{
 					WaitNodeReadyTimeoutSeconds: 300,
 					NodeSelector:                tt.nodeSelector,
@@ -607,12 +612,19 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 				NamespacedName: client.ObjectKeyFromObject(tt.node),
 			})
 
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			wantECSCalls := 0
+			if tt.expectECS {
+				wantECSCalls = 1
+			}
+			if api.describeInstancesCalls != wantECSCalls {
+				t.Fatalf("DescribeInstances calls = %d, want %d", api.describeInstancesCalls, wantECSCalls)
+			}
 			if tt.expectRequeue {
 				if result.RequeueAfter != tt.expectRequeueAt {
 					t.Errorf("expected RequeueAfter %v, got %v", tt.expectRequeueAt, result.RequeueAfter)
-				}
-				if err != nil {
-					t.Errorf("expected no error, got %v", err)
 				}
 				return
 			}
@@ -620,6 +632,68 @@ func TestReconcileNodeReadyGate(t *testing.T) {
 				t.Errorf("should not have requeued with node-ready delay")
 			}
 		})
+	}
+}
+
+func TestNodeReconcilerExistingERdmaDeviceSkipsProvisioningAndLeavesCRUnchanged(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := networkv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add ERdmaDevice scheme: %v", err)
+	}
+
+	node := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-with-device"},
+		Spec:       v1.NodeSpec{ProviderID: "cn-hangzhou.i-current"},
+	}
+	device := &networkv1.ERdmaDevice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-with-device",
+			Labels: map[string]string{
+				"alibabacloud.com/instance-id": "i-existing",
+			},
+		},
+		Spec: networkv1.ERdmaDeviceSpec{
+			Devices: []networkv1.DeviceInfo{{ID: "eni-existing"}},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(node, device).
+		Build()
+	api := &fakeEriAPI{}
+	reconciler := &NodeReconciler{
+		Client:     fakeClient,
+		EriClient:  &EriClient{client: api},
+		CtrlConfig: &types.Config{},
+	}
+
+	for range 2 {
+		if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: client.ObjectKeyFromObject(node),
+		}); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+	if api.describeInstancesCalls != 2 {
+		t.Fatalf("DescribeInstances calls = %d, want one per reconcile to preserve ERI tag backfill semantics", api.describeInstancesCalls)
+	}
+	if api.describeInstanceTypesCalls != 0 || api.describeNetworkInterfacesCalls != 0 {
+		t.Fatalf("provisioning API calls = instance types %d network interfaces %d, want 0",
+			api.describeInstanceTypesCalls, api.describeNetworkInterfacesCalls)
+	}
+	if api.tagResourcesCalls != 1 {
+		t.Fatalf("TagResources calls = %d, want 1 to preserve existing backfill behavior", api.tagResourcesCalls)
+	}
+	got := &networkv1.ERdmaDevice{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(device), got); err != nil {
+		t.Fatalf("get ERdmaDevice: %v", err)
+	}
+	if got.Spec.Devices[0].ID != "eni-existing" ||
+		got.Labels["alibabacloud.com/instance-id"] != "i-existing" {
+		t.Fatalf("existing ERdmaDevice was changed: %#v", got)
 	}
 }
 

@@ -66,15 +66,22 @@ config:
   enableInitContainerInject: true
   smcInitImage: ""
   localERIDiscovery: false
-  # Concurrent Node reconciles create ERIs through ECS OpenAPI. Defaults to 5 when omitted or zero.
-  nodeMaxConcurrentReconciles: 5
-  # Concurrent ERdmaDevice reconciles attach and configure ERIs. Defaults to 10 when omitted or zero.
-  erdmaDeviceMaxConcurrentReconciles: 10
-  # Optional per-minute overrides for the ECS OpenAPIs used by this controller.
-  # Built-in defaults use one quarter of each ECS OpenAPI's documented quota.
-  # rateLimit:
-  #   CreateNetworkInterface: 125
-  rateLimit: {}
+  # Concurrent Node reconciles create ERIs through ECS OpenAPI. Defaults to 10 when omitted or zero.
+  nodeMaxConcurrentReconciles: 10
+  # Concurrent ERdmaDevice reconciles attach and configure ERIs. Defaults to 20 when omitted or zero.
+  erdmaDeviceMaxConcurrentReconciles: 20
+  # ECS OpenAPI requests per minute. Optional rateLimitBurst overrides control
+  # token bursts per operation; set every value to 1 for fully smoothed traffic.
+  rateLimit:
+    DescribeInstances: 500
+    DescribeNetworkInterfaces: 1000
+    CreateNetworkInterface: 250
+    ModifyNetworkInterfaceAttribute: 500
+    TagResources: 500
+    DescribeInstanceTypes: 200
+    AttachNetworkInterface: 250
+    DescribeInstanceAttribute: 1000
+  rateLimitBurst: {}
 
 credentials:
   type: ""

@@ -16,8 +16,8 @@ const (
 	defaultConfigPath                         = "/etc/erdma-controller/config.json"
 	defaultCredentialPath                     = "/etc/erdma-controller-credential/credential.json"
 	regionIDAddr                              = "http://100.100.100.200/latest/meta-data/region-id"
-	defaultNodeMaxConcurrentReconciles        = 5
-	defaultERdmaDeviceMaxConcurrentReconciles = 10
+	defaultNodeMaxConcurrentReconciles        = 10
+	defaultERdmaDeviceMaxConcurrentReconciles = 20
 )
 
 var configLog = ctrl.Log.WithName("config")

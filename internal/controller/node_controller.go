@@ -2,15 +2,16 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"sync"
 	"time"
 
+	aliyunclient "github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/aliyun/client"
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/types"
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -82,6 +83,12 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if !node.GetDeletionTimestamp().IsZero() {
 		return RemoveERdmaDevices(r.Client, ctx, req.Name)
 	}
+	existingDevice := &networkv1.ERdmaDevice{}
+	err = r.Client.Get(ctx, client.ObjectKey{Name: node.Name}, existingDevice)
+	deviceExists := err == nil
+	if err != nil && !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
 	if !isNodeReady(&node) {
 		leaseReady, err := r.hasFreshNodeLease(ctx, &node, time.Now())
 		if err != nil {
@@ -102,83 +109,66 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	erdmaLogger.WithValues("node", req).Info("Node Added")
 
-	instanceID, err := r.EriClient.InstanceIDFromNode(ctx, &node)
+	instanceInfo, err := r.EriClient.InstanceFromNode(ctx, &node)
 	if err != nil {
-		return ctrl.Result{}, err
+		return requeueOnECSThrottling(err, erdmaLogger)
 	}
-	erdmaDevices := networkv1.ERdmaDeviceList{}
-	err = r.Client.List(ctx, &erdmaDevices, client.MatchingLabels{
-		"alibabacloud.com/instance-id": instanceID,
-	})
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if len(erdmaDevices.Items) == 0 {
-		eri, err := r.EriClient.SelectERIs(ctx, instanceID)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if eri == nil {
-			erdmaLogger.Info("node not support erdma", "name", node.Name, "instance-id", instanceID)
-			return ctrl.Result{}, nil
-		}
-		jumboFrame, err := r.EriClient.IsJumboFrameEnabled(ctx, instanceID)
-		if err != nil {
-			erdmaLogger.Error(err, "failed to check jumbo frame status, defaulting to false")
-			jumboFrame = false
-		}
-		erdmaDevice := networkv1.ERdmaDevice{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: node.Name,
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion: node.APIVersion,
-						Kind:       node.Kind,
-						Name:       node.Name,
-						UID:        node.UID,
-					},
-				},
-				Labels: map[string]string{
-					"alibabacloud.com/instance-id": instanceID,
-					"alibabacloud.com/nodename":    node.Name,
-				},
-			},
-			Spec: networkv1.ERdmaDeviceSpec{
-				JumboFrame: jumboFrame,
-				Devices: lo.Map(eri, func(item *types.ERI, index int) networkv1.DeviceInfo {
-					return networkv1.DeviceInfo{
-						InstanceID:       item.InstanceID,
-						MAC:              item.MAC,
-						IsPrimaryENI:     item.IsPrimaryENI,
-						ID:               item.ID,
-						NetworkCardIndex: item.CardIndex,
-						QueuePair:        item.QueuePair,
-					}
-				}),
-			},
-		}
-		err = r.Client.Create(ctx, &erdmaDevice)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		_ = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-			dev := &networkv1.ERdmaDevice{}
-			err := r.Client.Get(ctx, k8stypes.NamespacedName{
-				Name: erdmaDevice.Name,
-			}, dev)
-			if err != nil {
-				return false, nil
-			}
-			return true, nil
-		})
-
+	instanceID := *instanceInfo.InstanceId
+	if deviceExists {
+		r.backfillEriTags(ctx, []networkv1.ERdmaDevice{*existingDevice}, instanceID, erdmaLogger)
 		return ctrl.Result{}, nil
 	}
-
-	// Existing ERdmaDevice CR path: backfill terway-compat tags once per
-	// controller lifetime so old nodes provisioned before this feature also
-	// stop conflicting with terway.
-	r.backfillEriTags(ctx, erdmaDevices.Items, instanceID, erdmaLogger)
+	eri, err := r.EriClient.SelectERIs(ctx, instanceInfo)
+	if err != nil {
+		return requeueOnECSThrottling(err, erdmaLogger)
+	}
+	if eri == nil {
+		erdmaLogger.Info("node not support erdma", "name", node.Name, "instance-id", instanceID)
+		return ctrl.Result{}, nil
+	}
+	jumboFrame, err := r.EriClient.IsJumboFrameEnabled(ctx, instanceID)
+	if err != nil {
+		var throttlingErr *aliyunclient.ThrottlingError
+		if stderrors.As(err, &throttlingErr) {
+			return requeueOnECSThrottling(err, erdmaLogger)
+		}
+		erdmaLogger.Error(err, "failed to check jumbo frame status, defaulting to false")
+		jumboFrame = false
+	}
+	erdmaDevice := networkv1.ERdmaDevice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: node.Name,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: node.APIVersion,
+					Kind:       node.Kind,
+					Name:       node.Name,
+					UID:        node.UID,
+				},
+			},
+			Labels: map[string]string{
+				"alibabacloud.com/instance-id": instanceID,
+				"alibabacloud.com/nodename":    node.Name,
+			},
+		},
+		Spec: networkv1.ERdmaDeviceSpec{
+			JumboFrame: jumboFrame,
+			Devices: lo.Map(eri, func(item *types.ERI, index int) networkv1.DeviceInfo {
+				return networkv1.DeviceInfo{
+					InstanceID:       item.InstanceID,
+					MAC:              item.MAC,
+					IsPrimaryENI:     item.IsPrimaryENI,
+					ID:               item.ID,
+					NetworkCardIndex: item.CardIndex,
+					QueuePair:        item.QueuePair,
+				}
+			}),
+		},
+	}
+	err = r.Client.Create(ctx, &erdmaDevice)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -186,27 +176,23 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 func (r *NodeReconciler) backfillEriTags(ctx context.Context, devices []networkv1.ERdmaDevice, instanceID string, logger logr.Logger) {
 	var pending []string
 	for _, dev := range devices {
-		for _, d := range dev.Spec.Devices {
-			if d.ID == "" {
+		for _, device := range dev.Spec.Devices {
+			if device.ID == "" {
 				continue
 			}
-			if _, loaded := r.taggedENIs.LoadOrStore(d.ID, struct{}{}); loaded {
+			if _, loaded := r.taggedENIs.LoadOrStore(device.ID, struct{}{}); loaded {
 				continue
 			}
-			pending = append(pending, d.ID)
+			pending = append(pending, device.ID)
 		}
 	}
 	if len(pending) == 0 {
 		return
 	}
 	if err := r.EriClient.EnsureEriTags(ctx, pending, instanceID); err != nil {
-		// Roll back the in-memory marker so the next reconcile retries.
 		for _, id := range pending {
 			r.taggedENIs.Delete(id)
 		}
-		// Best-effort: terway does not strictly depend on these tags, and the
-		// managed RAM role may lack ecs:TagResources. Log a warning instead of
-		// an error (which would emit a noisy stack trace) and retry next reconcile.
 		logger.Info("WARNING: skipped terway-compat tag backfill on existing ERIs (best-effort, will retry)", "enis", pending, "instanceID", instanceID, "error", err.Error())
 		return
 	}

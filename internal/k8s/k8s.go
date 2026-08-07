@@ -10,18 +10,32 @@ import (
 
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/cache"
+	watchtools "k8s.io/client-go/tools/watch"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var (
-	scheme = runtime.NewScheme()
-	k8sLog = ctrl.Log.WithName("k8s")
+var scheme = runtime.NewScheme()
+
+const (
+	eriNodeNameLabel        = "alibabacloud.com/nodename"
+	eriInfoListTimeout      = 10 * time.Second
+	eriDeviceResourcePlural = "erdmadevices"
 )
+
+var eriDeviceGVR = schema.GroupVersionResource{
+	Group:    v1.GroupVersion.Group,
+	Version:  v1.GroupVersion.Version,
+	Resource: eriDeviceResourcePlural,
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -35,11 +49,9 @@ type Kubernetes interface {
 func NewKubernetes() (Kubernetes, error) {
 	restConfig := ctrl.GetConfigOrDie()
 	restConfig.UserAgent = consts.UA
-	c, err := client.New(restConfig, client.Options{
-		Scheme: scheme,
-	})
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create Kubernetes dynamic client: %w", err)
 	}
 
 	nodeName := os.Getenv("NODE_NAME")
@@ -48,37 +60,60 @@ func NewKubernetes() (Kubernetes, error) {
 	}
 	return &k8s{
 		nodeName: nodeName,
-		client:   c,
+		resource: dynamicClient.Resource(eriDeviceGVR),
 	}, nil
 }
 
 type k8s struct {
 	nodeName string
-	client   client.Client
+	resource dynamic.ResourceInterface
 }
 
 func (k *k8s) WaitEriInfo() (*v1.ERdmaDevice, error) {
-	device := &v1.ERdmaDevice{}
-	err := wait.PollUntilContextCancel(context.Background(), 1*time.Minute, true, func(context.Context) (bool, error) {
-		erdmaDeviceList := &v1.ERdmaDeviceList{}
-		err := k.client.List(context.TODO(), erdmaDeviceList, client.MatchingLabels{
-			"alibabacloud.com/nodename": k.nodeName,
-		}, &client.ListOptions{Raw: &metav1.ListOptions{
-			ResourceVersion: "0",
-		}})
-		if err != nil {
-			k8sLog.Error(err, "failed to list erdma devices")
-			return true, fmt.Errorf("failed to list erdma devices, %v", err)
-		}
-		if len(erdmaDeviceList.Items) == 0 {
-			k8sLog.Info("waiting for erdma devices")
+	return k.waitEriInfo(context.Background())
+}
+
+func hasERdmaDeviceSpec(device *v1.ERdmaDevice) bool {
+	return device != nil && len(device.Spec.Devices) > 0
+}
+
+func (k *k8s) waitEriInfo(ctx context.Context) (*v1.ERdmaDevice, error) {
+	selector := labels.Set{eriNodeNameLabel: k.nodeName}.AsSelector().String()
+	lw := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			options.LabelSelector = selector
+			listCtx, cancel := context.WithTimeout(ctx, eriInfoListTimeout)
+			defer cancel()
+			return k.resource.List(listCtx, options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.LabelSelector = selector
+			return k.resource.Watch(ctx, options)
+		},
+	}
+	objectType := &unstructured.Unstructured{}
+	objectType.SetGroupVersionKind(v1.GroupVersion.WithKind("ERdmaDevice"))
+
+	var device *v1.ERdmaDevice
+	_, err := watchtools.UntilWithSync(ctx, lw, objectType, nil, func(event watch.Event) (bool, error) {
+		if event.Type != watch.Added && event.Type != watch.Modified {
 			return false, nil
 		}
-		device = &erdmaDeviceList.Items[0]
+		object, ok := event.Object.(*unstructured.Unstructured)
+		if !ok || object.GetName() != k.nodeName {
+			return false, nil
+		}
+		device = &v1.ERdmaDevice{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, device); err != nil {
+			return false, fmt.Errorf("decode erdma device %s: %w", k.nodeName, err)
+		}
+		if !hasERdmaDeviceSpec(device) {
+			return false, nil
+		}
 		return true, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to wait erdma devices, %v", err)
+		return nil, fmt.Errorf("wait for erdma device %s: %w", k.nodeName, err)
 	}
 	return device, nil
 }

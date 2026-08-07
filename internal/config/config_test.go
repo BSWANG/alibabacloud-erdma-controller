@@ -8,12 +8,11 @@ import (
 
 func TestParseConfigControllerSettings(t *testing.T) {
 	tests := []struct {
-		name               string
-		config             string
-		expectedNode       int
-		expectedERdma      int
-		expectedLimitCount int
-		expectedPerMinute  int
+		name                 string
+		config               string
+		expectedNode         int
+		expectedERdma        int
+		expectedECSPerMinute int
 	}{
 		{
 			name:          "defaults when omitted",
@@ -22,12 +21,11 @@ func TestParseConfigControllerSettings(t *testing.T) {
 			expectedERdma: defaultERdmaDeviceMaxConcurrentReconciles,
 		},
 		{
-			name:               "uses per API limit",
-			config:             `{"region":"cn-test","nodeMaxConcurrentReconciles":3,"erdmaDeviceMaxConcurrentReconciles":7,"rateLimit":{"CreateNetworkInterface":600}}`,
-			expectedNode:       3,
-			expectedERdma:      7,
-			expectedLimitCount: 1,
-			expectedPerMinute:  600,
+			name:                 "uses simple per-minute override",
+			config:               `{"region":"cn-test","nodeMaxConcurrentReconciles":3,"erdmaDeviceMaxConcurrentReconciles":7,"rateLimit":{"CreateNetworkInterface":630}}`,
+			expectedNode:         3,
+			expectedERdma:        7,
+			expectedECSPerMinute: 630,
 		},
 		{
 			name:          "replaces non-positive concurrency values",
@@ -43,7 +41,6 @@ func TestParseConfigControllerSettings(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.config), 0o600); err != nil {
 				t.Fatalf("write config: %v", err)
 			}
-
 			got, err := parseConfig(path)
 			if err != nil {
 				t.Fatalf("parseConfig() error = %v", err)
@@ -54,12 +51,24 @@ func TestParseConfigControllerSettings(t *testing.T) {
 			if got.ERdmaDeviceMaxConcurrentReconciles != tt.expectedERdma {
 				t.Errorf("ERdmaDeviceMaxConcurrentReconciles = %d, want %d", got.ERdmaDeviceMaxConcurrentReconciles, tt.expectedERdma)
 			}
-			if len(got.RateLimit) != tt.expectedLimitCount {
-				t.Fatalf("len(RateLimit) = %d, want %d", len(got.RateLimit), tt.expectedLimitCount)
-			}
-			if tt.expectedLimitCount > 0 && got.RateLimit["CreateNetworkInterface"] != tt.expectedPerMinute {
-				t.Errorf("CreateNetworkInterface limit = %d, want %d", got.RateLimit["CreateNetworkInterface"], tt.expectedPerMinute)
+			if tt.expectedECSPerMinute > 0 && got.RateLimit["CreateNetworkInterface"] != tt.expectedECSPerMinute {
+				t.Errorf("CreateNetworkInterface requests/minute = %v, want %v", got.RateLimit["CreateNetworkInterface"], tt.expectedECSPerMinute)
 			}
 		})
+	}
+}
+
+func TestParseConfigBurstSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{"region":"cn-test","rateLimitBurst":{"DescribeInstances":1}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	got, err := parseConfig(path)
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if got.RateLimitBurst["DescribeInstances"] != 1 {
+		t.Fatalf("DescribeInstances burst = %d, want 1", got.RateLimitBurst["DescribeInstances"])
 	}
 }

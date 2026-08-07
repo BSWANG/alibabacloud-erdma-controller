@@ -19,17 +19,23 @@ package client
 import (
 	"context"
 	"errors"
+	"github.com/alibabacloud-go/tea/tea"
 	"testing"
 
 	ecs "github.com/alibabacloud-go/ecs-20140526/v4/client"
+	"golang.org/x/time/rate"
 )
 
 type fakeECSAPI struct {
-	calls map[ecsOperation]int
+	calls                map[ecsOperation]int
+	describeInstancesErr error
 }
 
 func (f *fakeECSAPI) DescribeInstances(*ecs.DescribeInstancesRequest) (*ecs.DescribeInstancesResponse, error) {
 	f.calls[ecsDescribeInstances]++
+	if f.describeInstancesErr != nil {
+		return nil, f.describeInstancesErr
+	}
 	return &ecs.DescribeInstancesResponse{}, nil
 }
 
@@ -111,10 +117,11 @@ func TestECSServiceRateLimitsBeforeCallingSDK(t *testing.T) {
 		name := ecsOperationConfigs[tt.operation].name
 		t.Run(name, func(t *testing.T) {
 			rawClient := &fakeECSAPI{calls: map[ecsOperation]int{}}
-			client, err := NewECSService(rawClient, map[string]int{name: 1})
+			client, err := NewECSService(rawClient, map[string]int{name: 1}, nil)
 			if err != nil {
 				t.Fatalf("NewECSService() error = %v", err)
 			}
+			client.rateLimiter.store[tt.operation] = rate.NewLimiter(0.01, 1)
 
 			if err := tt.call(context.Background(), client); err != nil {
 				t.Fatalf("first call error = %v", err)
@@ -128,5 +135,71 @@ func TestECSServiceRateLimitsBeforeCallingSDK(t *testing.T) {
 				t.Fatalf("SDK calls = %d, want 1", rawClient.calls[tt.operation])
 			}
 		})
+	}
+}
+
+func TestECSServiceClassifiesRemoteThrottlingWithoutHTTP429(t *testing.T) {
+	sdkErr := &tea.SDKError{
+		StatusCode: tea.Int(400),
+		Code:       tea.String("Throttling"),
+		Message:    tea.String("request was denied due to request throttling"),
+	}
+	rawClient := &fakeECSAPI{
+		calls:                map[ecsOperation]int{},
+		describeInstancesErr: sdkErr,
+	}
+	client, err := NewECSService(rawClient, nil, nil)
+	if err != nil {
+		t.Fatalf("NewECSService() error = %v", err)
+	}
+
+	_, err = client.DescribeInstances(context.Background(), &ecs.DescribeInstancesRequest{})
+	var throttlingErr *ThrottlingError
+	if !errors.As(err, &throttlingErr) {
+		t.Fatalf("DescribeInstances() error = %T %v, want *ThrottlingError", err, err)
+	}
+	if throttlingErr.Operation() != "DescribeInstances" || throttlingErr.Code() != "Throttling" || throttlingErr.StatusCode() != 400 {
+		t.Fatalf("ThrottlingError = api %q code %q status %d", throttlingErr.Operation(), throttlingErr.Code(), throttlingErr.StatusCode())
+	}
+	if throttlingErr.RetryAfter() < minThrottlingRetryDelay || throttlingErr.RetryAfter() > maxThrottlingRetryDelay {
+		t.Fatalf("RetryAfter = %v, want [%v,%v]", throttlingErr.RetryAfter(), minThrottlingRetryDelay, maxThrottlingRetryDelay)
+	}
+	if !errors.Is(err, sdkErr) {
+		t.Fatal("ThrottlingError does not preserve the SDK error")
+	}
+}
+
+func TestWrapECSAPIErrorClassifiesHTTP429(t *testing.T) {
+	sdkErr := &tea.SDKError{
+		StatusCode: tea.Int(429),
+		Code:       tea.String("UnknownLimitCode"),
+	}
+	err := wrapECSAPIError(ecsAttachNetworkInterface, sdkErr)
+	var throttlingErr *ThrottlingError
+	if !errors.As(err, &throttlingErr) {
+		t.Fatalf("wrapECSAPIError() error = %T %v, want *ThrottlingError", err, err)
+	}
+	if throttlingErr.Operation() != "AttachNetworkInterface" || throttlingErr.StatusCode() != 429 {
+		t.Fatalf("ThrottlingError = api %q status %d", throttlingErr.Operation(), throttlingErr.StatusCode())
+	}
+}
+
+func TestECSServiceDoesNotMisclassifyNonThrottlingSDKError(t *testing.T) {
+	sdkErr := &tea.SDKError{StatusCode: tea.Int(400), Code: tea.String("InvalidParameter")}
+	rawClient := &fakeECSAPI{
+		calls:                map[ecsOperation]int{},
+		describeInstancesErr: sdkErr,
+	}
+	client, err := NewECSService(rawClient, nil, nil)
+	if err != nil {
+		t.Fatalf("NewECSService() error = %v", err)
+	}
+	_, err = client.DescribeInstances(context.Background(), &ecs.DescribeInstancesRequest{})
+	var throttlingErr *ThrottlingError
+	if errors.As(err, &throttlingErr) {
+		t.Fatalf("DescribeInstances() error = %#v, unexpectedly classified as throttling", err)
+	}
+	if !errors.Is(err, sdkErr) {
+		t.Fatalf("DescribeInstances() error = %v, want original SDK error", err)
 	}
 }

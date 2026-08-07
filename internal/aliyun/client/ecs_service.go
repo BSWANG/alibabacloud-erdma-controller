@@ -41,8 +41,8 @@ type ECSService struct {
 	rateLimiter *rateLimiter
 }
 
-func NewECSService(client ecsAPI, overrides map[string]int) (*ECSService, error) {
-	limiter, err := newRateLimiter(overrides)
+func NewECSService(client ecsAPI, rateOverrides, burstOverrides map[string]int) (*ECSService, error) {
+	limiter, err := newRateLimiter(rateOverrides, burstOverrides)
 	if err != nil {
 		return nil, err
 	}
@@ -56,54 +56,62 @@ func (a *ECSService) DescribeInstances(ctx context.Context, request *ecs.Describ
 	if err := a.rateLimiter.wait(ctx, ecsDescribeInstances); err != nil {
 		return nil, err
 	}
-	return a.client.DescribeInstances(request)
+	resp, err := a.client.DescribeInstances(request)
+	return resp, wrapECSAPIError(ecsDescribeInstances, err)
 }
 
 func (a *ECSService) DescribeNetworkInterfaces(ctx context.Context, request *ecs.DescribeNetworkInterfacesRequest) (*ecs.DescribeNetworkInterfacesResponse, error) {
 	if err := a.rateLimiter.wait(ctx, ecsDescribeNetworkInterfaces); err != nil {
 		return nil, err
 	}
-	return a.client.DescribeNetworkInterfaces(request)
+	resp, err := a.client.DescribeNetworkInterfaces(request)
+	return resp, wrapECSAPIError(ecsDescribeNetworkInterfaces, err)
 }
 
 func (a *ECSService) CreateNetworkInterface(ctx context.Context, request *ecs.CreateNetworkInterfaceRequest) (*ecs.CreateNetworkInterfaceResponse, error) {
 	if err := a.rateLimiter.wait(ctx, ecsCreateNetworkInterface); err != nil {
 		return nil, err
 	}
-	return a.client.CreateNetworkInterface(request)
+	resp, err := a.client.CreateNetworkInterface(request)
+	return resp, wrapECSAPIError(ecsCreateNetworkInterface, err)
 }
 
 func (a *ECSService) ModifyNetworkInterfaceAttribute(ctx context.Context, request *ecs.ModifyNetworkInterfaceAttributeRequest) (*ecs.ModifyNetworkInterfaceAttributeResponse, error) {
 	if err := a.rateLimiter.wait(ctx, ecsModifyNetworkInterfaceAttribute); err != nil {
 		return nil, err
 	}
-	return a.client.ModifyNetworkInterfaceAttribute(request)
+	resp, err := a.client.ModifyNetworkInterfaceAttribute(request)
+	return resp, wrapECSAPIError(ecsModifyNetworkInterfaceAttribute, err)
 }
 
 func (a *ECSService) TagResources(ctx context.Context, request *ecs.TagResourcesRequest) (*ecs.TagResourcesResponse, error) {
 	if err := a.rateLimiter.wait(ctx, ecsTagResources); err != nil {
 		return nil, err
 	}
-	return a.client.TagResources(request)
+	resp, err := a.client.TagResources(request)
+	return resp, wrapECSAPIError(ecsTagResources, err)
 }
 
 func (a *ECSService) DescribeInstanceTypes(ctx context.Context, request *ecs.DescribeInstanceTypesRequest) (*ecs.DescribeInstanceTypesResponse, error) {
 	if err := a.rateLimiter.wait(ctx, ecsDescribeInstanceTypes); err != nil {
 		return nil, err
 	}
-	return a.client.DescribeInstanceTypes(request)
+	resp, err := a.client.DescribeInstanceTypes(request)
+	return resp, wrapECSAPIError(ecsDescribeInstanceTypes, err)
 }
 
 func (a *ECSService) AttachNetworkInterface(ctx context.Context, request *ecs.AttachNetworkInterfaceRequest) (*ecs.AttachNetworkInterfaceResponse, error) {
 	if err := a.rateLimiter.wait(ctx, ecsAttachNetworkInterface); err != nil {
 		return nil, err
 	}
-	return a.client.AttachNetworkInterface(request)
+	resp, err := a.client.AttachNetworkInterface(request)
+	return resp, wrapECSAPIError(ecsAttachNetworkInterface, err)
 }
 
 func (a *ECSService) DescribeInstanceAttribute(ctx context.Context, request *ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error) {
 	if err := a.rateLimiter.wait(ctx, ecsDescribeInstanceAttribute); err != nil {
 		return nil, err
 	}
-	return a.client.DescribeInstanceAttribute(request)
+	resp, err := a.client.DescribeInstanceAttribute(request)
+	return resp, wrapECSAPIError(ecsDescribeInstanceAttribute, err)
 }
