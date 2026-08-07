@@ -16,7 +16,6 @@ type Config struct {
 	NodeMaxConcurrentReconciles        int               `json:"nodeMaxConcurrentReconciles"`
 	ERdmaDeviceMaxConcurrentReconciles int               `json:"erdmaDeviceMaxConcurrentReconciles"`
 	RateLimit                          map[string]int    `json:"rateLimit"`
-	RateLimitBurst                     map[string]int    `json:"rateLimitBurst"`
 }
 
 type Sensitive string

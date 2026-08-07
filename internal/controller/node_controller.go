@@ -108,16 +108,20 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	erdmaLogger.WithValues("node", req).Info("Node Added")
+	if deviceExists {
+		// Existing ERdmaDevice CR path: backfill terway-compat tags once per
+		// controller lifetime so old nodes provisioned before this feature also
+		// stop conflicting with terway.
+		instanceID := existingDevice.Labels["alibabacloud.com/instance-id"]
+		r.backfillEriTags(ctx, []networkv1.ERdmaDevice{*existingDevice}, instanceID, erdmaLogger)
+		return ctrl.Result{}, nil
+	}
 
 	instanceInfo, err := r.EriClient.InstanceFromNode(ctx, &node)
 	if err != nil {
 		return requeueOnECSThrottling(err, erdmaLogger)
 	}
 	instanceID := *instanceInfo.InstanceId
-	if deviceExists {
-		r.backfillEriTags(ctx, []networkv1.ERdmaDevice{*existingDevice}, instanceID, erdmaLogger)
-		return ctrl.Result{}, nil
-	}
 	eri, err := r.EriClient.SelectERIs(ctx, instanceInfo)
 	if err != nil {
 		return requeueOnECSThrottling(err, erdmaLogger)
@@ -190,9 +194,13 @@ func (r *NodeReconciler) backfillEriTags(ctx context.Context, devices []networkv
 		return
 	}
 	if err := r.EriClient.EnsureEriTags(ctx, pending, instanceID); err != nil {
+		// Roll back the in-memory marker so the next reconcile retries.
 		for _, id := range pending {
 			r.taggedENIs.Delete(id)
 		}
+		// Best-effort: terway does not strictly depend on these tags, and the
+		// managed RAM role may lack ecs:TagResources. Log a warning instead of
+		// an error (which would emit a noisy stack trace) and retry next reconcile.
 		logger.Info("WARNING: skipped terway-compat tag backfill on existing ERIs (best-effort, will retry)", "enis", pending, "instanceID", instanceID, "error", err.Error())
 		return
 	}
@@ -211,8 +219,7 @@ func RemoveERdmaDevices(erdmaClient client.Client, ctx context.Context, nodeName
 	if len(erdmaDevices.Items) == 0 {
 		return ctrl.Result{}, nil
 	}
-	// Cleanup races with the ERdmaDevice reconciler; an object disappearing
-	// after the List is already the desired result.
+	// Object deletion after the List is already the desired result.
 	for i := range erdmaDevices.Items {
 		device := &erdmaDevices.Items[i]
 		if !controllerutil.ContainsFinalizer(device, erdmaFinalizer) {

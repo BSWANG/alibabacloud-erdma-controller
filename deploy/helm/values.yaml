@@ -70,8 +70,7 @@ config:
   nodeMaxConcurrentReconciles: 10
   # Concurrent ERdmaDevice reconciles attach and configure ERIs. Defaults to 20 when omitted or zero.
   erdmaDeviceMaxConcurrentReconciles: 20
-  # ECS OpenAPI requests per minute. Optional rateLimitBurst overrides control
-  # token bursts per operation; set every value to 1 for fully smoothed traffic.
+  # ECS OpenAPI requests per minute.
   rateLimit:
     DescribeInstances: 500
     DescribeNetworkInterfaces: 1000
@@ -81,7 +80,6 @@ config:
     DescribeInstanceTypes: 200
     AttachNetworkInterface: 250
     DescribeInstanceAttribute: 1000
-  rateLimitBurst: {}
 
 credentials:
   type: ""

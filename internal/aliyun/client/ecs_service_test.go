@@ -117,7 +117,7 @@ func TestECSServiceRateLimitsBeforeCallingSDK(t *testing.T) {
 		name := ecsOperationConfigs[tt.operation].name
 		t.Run(name, func(t *testing.T) {
 			rawClient := &fakeECSAPI{calls: map[ecsOperation]int{}}
-			client, err := NewECSService(rawClient, map[string]int{name: 1}, nil)
+			client, err := NewECSService(rawClient, map[string]int{name: 1})
 			if err != nil {
 				t.Fatalf("NewECSService() error = %v", err)
 			}
@@ -148,7 +148,7 @@ func TestECSServiceClassifiesRemoteThrottlingWithoutHTTP429(t *testing.T) {
 		calls:                map[ecsOperation]int{},
 		describeInstancesErr: sdkErr,
 	}
-	client, err := NewECSService(rawClient, nil, nil)
+	client, err := NewECSService(rawClient, nil)
 	if err != nil {
 		t.Fatalf("NewECSService() error = %v", err)
 	}
@@ -190,7 +190,7 @@ func TestECSServiceDoesNotMisclassifyNonThrottlingSDKError(t *testing.T) {
 		calls:                map[ecsOperation]int{},
 		describeInstancesErr: sdkErr,
 	}
-	client, err := NewECSService(rawClient, nil, nil)
+	client, err := NewECSService(rawClient, nil)
 	if err != nil {
 		t.Fatalf("NewECSService() error = %v", err)
 	}

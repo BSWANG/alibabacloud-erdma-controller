@@ -41,28 +41,20 @@ const (
 	ecsOperationCount
 )
 
-type rateLimitConfig struct {
-	perMinute int
-	burst     int
-}
-
 type ecsOperationConfig struct {
-	name        string
-	defaultRate rateLimitConfig
+	name             string
+	defaultPerMinute int
 }
 
-// Defaults deliberately stay below the documented ECS quotas. Users configure
-// the familiar requests-per-minute value; the controller converts it to QPS
-// and owns conservative per-operation burst limits.
 var ecsOperationConfigs = [ecsOperationCount]ecsOperationConfig{
-	ecsDescribeInstances:               {name: "DescribeInstances", defaultRate: rateLimitConfig{perMinute: 500, burst: 50}},
-	ecsDescribeNetworkInterfaces:       {name: "DescribeNetworkInterfaces", defaultRate: rateLimitConfig{perMinute: 1000, burst: 50}},
-	ecsCreateNetworkInterface:          {name: "CreateNetworkInterface", defaultRate: rateLimitConfig{perMinute: 250, burst: 10}},
-	ecsModifyNetworkInterfaceAttribute: {name: "ModifyNetworkInterfaceAttribute", defaultRate: rateLimitConfig{perMinute: 500, burst: 10}},
-	ecsTagResources:                    {name: "TagResources", defaultRate: rateLimitConfig{perMinute: 500, burst: 25}},
-	ecsDescribeInstanceTypes:           {name: "DescribeInstanceTypes", defaultRate: rateLimitConfig{perMinute: 200, burst: 10}},
-	ecsAttachNetworkInterface:          {name: "AttachNetworkInterface", defaultRate: rateLimitConfig{perMinute: 250, burst: 10}},
-	ecsDescribeInstanceAttribute:       {name: "DescribeInstanceAttribute", defaultRate: rateLimitConfig{perMinute: 1000, burst: 50}},
+	ecsDescribeInstances:               {name: "DescribeInstances", defaultPerMinute: 500},
+	ecsDescribeNetworkInterfaces:       {name: "DescribeNetworkInterfaces", defaultPerMinute: 1000},
+	ecsCreateNetworkInterface:          {name: "CreateNetworkInterface", defaultPerMinute: 250},
+	ecsModifyNetworkInterfaceAttribute: {name: "ModifyNetworkInterfaceAttribute", defaultPerMinute: 500},
+	ecsTagResources:                    {name: "TagResources", defaultPerMinute: 500},
+	ecsDescribeInstanceTypes:           {name: "DescribeInstanceTypes", defaultPerMinute: 200},
+	ecsAttachNetworkInterface:          {name: "AttachNetworkInterface", defaultPerMinute: 250},
+	ecsDescribeInstanceAttribute:       {name: "DescribeInstanceAttribute", defaultPerMinute: 1000},
 }
 
 type rateLimiter struct {
@@ -78,7 +70,7 @@ func operationByName(name string) (ecsOperation, bool) {
 	return 0, false
 }
 
-func newRateLimiter(rateOverrides, burstOverrides map[string]int) (*rateLimiter, error) {
+func newRateLimiter(rateOverrides map[string]int) (*rateLimiter, error) {
 	for name, perMinute := range rateOverrides {
 		if _, ok := operationByName(name); !ok {
 			return nil, fmt.Errorf("unsupported ECS OpenAPI rate limit %q", name)
@@ -87,26 +79,14 @@ func newRateLimiter(rateOverrides, burstOverrides map[string]int) (*rateLimiter,
 			return nil, fmt.Errorf("ECS OpenAPI rate limit %q requests per minute must be positive", name)
 		}
 	}
-	for name, burst := range burstOverrides {
-		if _, ok := operationByName(name); !ok {
-			return nil, fmt.Errorf("unsupported ECS OpenAPI burst limit %q", name)
-		}
-		if burst <= 0 {
-			return nil, fmt.Errorf("ECS OpenAPI burst limit %q must be positive", name)
-		}
-	}
 
 	r := &rateLimiter{}
 	for operation, config := range ecsOperationConfigs {
-		perMinute := config.defaultRate.perMinute
+		perMinute := config.defaultPerMinute
 		if override, ok := rateOverrides[config.name]; ok {
 			perMinute = override
 		}
-		burst := config.defaultRate.burst
-		if override, ok := burstOverrides[config.name]; ok {
-			burst = override
-		}
-		r.store[operation] = rate.NewLimiter(rate.Limit(float64(perMinute)/60), burst)
+		r.store[operation] = rate.NewLimiter(rate.Limit(float64(perMinute)/60), 1)
 	}
 	return r, nil
 }

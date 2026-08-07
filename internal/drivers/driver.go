@@ -16,8 +16,7 @@ var (
 	driverLog = ctrl.Log.WithName("Driver")
 )
 
-// ErrERdmaLinkNotFound indicates that the network device exists but its
-// corresponding RDMA link has not appeared yet.
+// ErrERdmaLinkNotFound identifies a delayed RDMA link.
 var ErrERdmaLinkNotFound = errors.New("cannot found rdma link")
 
 type ERdmaDriver interface {

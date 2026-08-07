@@ -677,8 +677,8 @@ func TestNodeReconcilerExistingERdmaDeviceSkipsProvisioningAndLeavesCRUnchanged(
 			t.Fatalf("Reconcile() error = %v", err)
 		}
 	}
-	if api.describeInstancesCalls != 2 {
-		t.Fatalf("DescribeInstances calls = %d, want one per reconcile to preserve ERI tag backfill semantics", api.describeInstancesCalls)
+	if api.describeInstancesCalls != 0 {
+		t.Fatalf("DescribeInstances calls = %d, want 0 for an existing ERdmaDevice", api.describeInstancesCalls)
 	}
 	if api.describeInstanceTypesCalls != 0 || api.describeNetworkInterfacesCalls != 0 {
 		t.Fatalf("provisioning API calls = instance types %d network interfaces %d, want 0",

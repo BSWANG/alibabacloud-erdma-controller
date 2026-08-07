@@ -57,18 +57,3 @@ func TestParseConfigControllerSettings(t *testing.T) {
 		})
 	}
 }
-
-func TestParseConfigBurstSettings(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	content := `{"region":"cn-test","rateLimitBurst":{"DescribeInstances":1}}`
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	got, err := parseConfig(path)
-	if err != nil {
-		t.Fatalf("parseConfig() error = %v", err)
-	}
-	if got.RateLimitBurst["DescribeInstances"] != 1 {
-		t.Fatalf("DescribeInstances burst = %d, want 1", got.RateLimitBurst["DescribeInstances"])
-	}
-}

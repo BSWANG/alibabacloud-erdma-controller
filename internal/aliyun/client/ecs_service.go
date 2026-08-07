@@ -22,7 +22,6 @@ import (
 	ecs "github.com/alibabacloud-go/ecs-20140526/v4/client"
 )
 
-// ecsAPI is the subset of the ECS SDK used by ECSService.
 type ecsAPI interface {
 	DescribeInstances(*ecs.DescribeInstancesRequest) (*ecs.DescribeInstancesResponse, error)
 	DescribeNetworkInterfaces(*ecs.DescribeNetworkInterfacesRequest) (*ecs.DescribeNetworkInterfacesResponse, error)
@@ -34,15 +33,14 @@ type ecsAPI interface {
 	DescribeInstanceAttribute(*ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error)
 }
 
-// ECSService follows Terway's ECSService pattern: every SDK method waits on
-// the shared per-operation limiter before issuing the request.
+// ECSService rate limits ECS API calls.
 type ECSService struct {
 	client      ecsAPI
 	rateLimiter *rateLimiter
 }
 
-func NewECSService(client ecsAPI, rateOverrides, burstOverrides map[string]int) (*ECSService, error) {
-	limiter, err := newRateLimiter(rateOverrides, burstOverrides)
+func NewECSService(client ecsAPI, rateOverrides map[string]int) (*ECSService, error) {
+	limiter, err := newRateLimiter(rateOverrides)
 	if err != nil {
 		return nil, err
 	}

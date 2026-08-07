@@ -26,9 +26,7 @@ var (
 	agentLog = ctrl.Log.WithName("Agent")
 )
 
-// Probe every two seconds for up to three minutes. This covers the observed
-// roughly two-minute kernel RDMA-link appearance lag with margin, without
-// hiding a permanently missing link indefinitely.
+// RDMA links can appear after their network devices.
 var deviceProbeBackoff = wait.Backoff{
 	Duration: 2 * time.Second,
 	Factor:   1,

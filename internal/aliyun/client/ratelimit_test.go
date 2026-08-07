@@ -8,57 +8,46 @@ import (
 	"golang.org/x/time/rate"
 )
 
-func TestNewRateLimiterConvertsPerMinuteAndKeepsManagedBurst(t *testing.T) {
-	r, err := newRateLimiter(nil, nil)
+func TestNewRateLimiterConvertsPerMinute(t *testing.T) {
+	r, err := newRateLimiter(nil)
 	if err != nil {
 		t.Fatalf("newRateLimiter() error = %v", err)
 	}
 	for operation, config := range ecsOperationConfigs {
 		limiter := r.store[operation]
-		wantQPS := float64(config.defaultRate.perMinute) / 60
+		wantQPS := float64(config.defaultPerMinute) / 60
 		if float64(limiter.Limit()) != wantQPS {
 			t.Errorf("%s QPS = %v, want %v", config.name, limiter.Limit(), wantQPS)
-		}
-		if limiter.Burst() != config.defaultRate.burst {
-			t.Errorf("%s burst = %d, want %d", config.name, limiter.Burst(), config.defaultRate.burst)
 		}
 	}
 
 	const perMinute = 750
 	name := ecsOperationConfigs[ecsDescribeInstances].name
-	r, err = newRateLimiter(map[string]int{name: perMinute}, map[string]int{name: 1})
+	r, err = newRateLimiter(map[string]int{name: perMinute})
 	if err != nil {
 		t.Fatalf("newRateLimiter() with override error = %v", err)
 	}
 	if got, want := float64(r.store[ecsDescribeInstances].Limit()), float64(perMinute)/60; got != want {
 		t.Errorf("DescribeInstances QPS = %v, want %v", got, want)
 	}
-	if got := r.store[ecsDescribeInstances].Burst(); got != 1 {
-		t.Errorf("DescribeInstances burst = %d, want override 1", got)
-	}
 }
+
 func TestModifyNetworkInterfaceAttributeDefaultRate(t *testing.T) {
-	if got := ecsOperationConfigs[ecsModifyNetworkInterfaceAttribute].defaultRate.perMinute; got != 500 {
+	if got := ecsOperationConfigs[ecsModifyNetworkInterfaceAttribute].defaultPerMinute; got != 500 {
 		t.Fatalf("ModifyNetworkInterfaceAttribute requests/minute = %d, want 500", got)
 	}
 }
 
 func TestNewRateLimiterRejectsInvalidOverrides(t *testing.T) {
 	describeInstances := ecsOperationConfigs[ecsDescribeInstances].name
-	tests := []struct {
-		rates  map[string]int
-		bursts map[string]int
-	}{
-		{rates: map[string]int{"UnusedOpenAPI": 1}},
-		{rates: map[string]int{describeInstances: 0}},
-		{rates: map[string]int{describeInstances: -1}},
-		{bursts: map[string]int{"UnusedOpenAPI": 1}},
-		{bursts: map[string]int{describeInstances: 0}},
-		{bursts: map[string]int{describeInstances: -1}},
+	tests := []map[string]int{
+		{"UnusedOpenAPI": 1},
+		{describeInstances: 0},
+		{describeInstances: -1},
 	}
-	for _, tt := range tests {
-		if _, err := newRateLimiter(tt.rates, tt.bursts); err == nil {
-			t.Errorf("newRateLimiter(%v, %v) succeeded", tt.rates, tt.bursts)
+	for _, overrides := range tests {
+		if _, err := newRateLimiter(overrides); err == nil {
+			t.Errorf("newRateLimiter(%v) succeeded", overrides)
 		}
 	}
 }
@@ -67,7 +56,7 @@ func TestRateLimiterWaitHonorsContext(t *testing.T) {
 	describeInstances := ecsOperationConfigs[ecsDescribeInstances].name
 	r, err := newRateLimiter(map[string]int{
 		describeInstances: 1,
-	}, nil)
+	})
 	if err != nil {
 		t.Fatalf("newRateLimiter() error = %v", err)
 	}
@@ -84,7 +73,7 @@ func TestRateLimiterWaitHonorsContext(t *testing.T) {
 }
 
 func TestRateLimiterWaitRejectsUnknownOperation(t *testing.T) {
-	r, err := newRateLimiter(nil, nil)
+	r, err := newRateLimiter(nil)
 	if err != nil {
 		t.Fatalf("newRateLimiter() error = %v", err)
 	}

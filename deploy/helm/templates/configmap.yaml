@@ -21,6 +21,5 @@ data:
       "nodeMaxConcurrentReconciles": {{ .Values.config.nodeMaxConcurrentReconciles | default 10 }},
       "erdmaDeviceMaxConcurrentReconciles": {{ .Values.config.erdmaDeviceMaxConcurrentReconciles | default 20 }},
       "rateLimit": {{ .Values.config.rateLimit | toJson }},
-      "rateLimitBurst": {{ .Values.config.rateLimitBurst | default dict | toJson }},
       "nodeSelector": {{ .Values.nodeSelector | toJson }}
     }

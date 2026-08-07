@@ -14,8 +14,7 @@ const (
 	maxThrottlingRetryDelay = 15 * time.Second
 )
 
-// ThrottlingError preserves the ECS SDK error while carrying a non-blocking,
-// jittered delay for controller workqueue requeueing.
+// ThrottlingError carries a retry delay without discarding the SDK error.
 type ThrottlingError struct {
 	operation  string
 	code       string

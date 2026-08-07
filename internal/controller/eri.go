@@ -90,7 +90,7 @@ func NewEriClient(k8sClient client.Client) (*EriClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	ecsService, err := aliyunclient.NewECSService(client, config.GetConfig().RateLimit, config.GetConfig().RateLimitBurst)
+	ecsService, err := aliyunclient.NewECSService(client, config.GetConfig().RateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("configure ECS OpenAPI rate limiter: %w", err)
 	}
@@ -115,31 +115,31 @@ func (e *EriClient) InstanceFromNode(ctx context.Context, node *corev1.Node) (*e
 			InstanceIds: ptr.To(fmt.Sprintf("[\"%s\"]", instanceID)),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("cannot find instance %s: %w", instanceID, err)
+			return nil, fmt.Errorf("cannot found instance %s, %w", instanceID, err)
 		}
 		if *resp.Body.TotalCount > 0 {
 			return resp.Body.Instances.Instance[0], nil
 		}
-		eriLog.Info("cannot find instance from providerID", "provider-id", node.Spec.ProviderID)
+		eriLog.Info("cannot found instance from providerID", "provider-id", node.Spec.ProviderID)
 	}
 	internalIP, ok := lo.Find(node.Status.Addresses, func(address corev1.NodeAddress) bool {
 		return address.Type == corev1.NodeInternalIP
 	})
 	if !ok {
-		return nil, fmt.Errorf("cannot find instance from node internal ip")
+		return nil, fmt.Errorf("cannot found instance from node internal ip")
 	}
 	resp, err := e.client.DescribeInstances(ctx, &ecs.DescribeInstancesRequest{
 		RegionId:           ptr.To(e.regionID),
 		PrivateIpAddresses: ptr.To(fmt.Sprintf("[\"%s\"]", internalIP.Address)),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cannot find instance %s: %w", internalIP.Address, err)
+		return nil, fmt.Errorf("cannot found instance %s, %w", internalIP.Address, err)
 	}
 	if *resp.Body.TotalCount == 0 {
-		return nil, fmt.Errorf("cannot find instance from node internal ip %s", internalIP.Address)
+		return nil, fmt.Errorf("cannot found instance from node internal ip %s", internalIP.Address)
 	}
 	if *resp.Body.TotalCount > 1 {
-		return nil, fmt.Errorf("found multiple instances from node internal ip %s", internalIP.Address)
+		return nil, fmt.Errorf("found multiple instance from node internal ip %s", internalIP.Address)
 	}
 	return resp.Body.Instances.Instance[0], nil
 }
@@ -289,7 +289,7 @@ func (e *EriClient) loadERICapacityForInstanceType(ctx context.Context, instance
 		InstanceTypes: []*string{ptr.To(instanceTypeID)},
 	})
 	if err != nil {
-		return eriCapacity{}, fmt.Errorf("cannot find instance type %s: %w", instanceTypeID, err)
+		return eriCapacity{}, fmt.Errorf("cannot found instance type %s, %w", instanceTypeID, err)
 	}
 	for _, instanceType := range resp.Body.InstanceTypes.InstanceType {
 		if instanceType.InstanceTypeId == nil || *instanceType.InstanceTypeId != instanceTypeID {
@@ -309,6 +309,7 @@ func (e *EriClient) loadERICapacityForInstanceType(ctx context.Context, instance
 			capacity.cardCount = int(min(*instanceType.NetworkCardQuantity, *instanceType.EriQuantity))
 		}
 		capacity.queuePairCount = int(*instanceType.QueuePairNumber)
+		// GPU instance max queue pair number is card count * queue pair number
 		if instanceType.GPUAmount != nil && *instanceType.GPUAmount > 0 {
 			capacity.queuePairCount *= capacity.cardCount
 		}
@@ -336,12 +337,12 @@ func (e *EriClient) SelectERIs(ctx context.Context, instanceInfo *ecs.DescribeIn
 		PageSize:   ptr.To(int32(100)),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cannot find node ENI: %w", err)
+		return nil, fmt.Errorf("cannot found node eni: %w", err)
 	}
 	existENIs := describeENIResponse.Body.NetworkInterfaceSets.NetworkInterfaceSet
 	selectEriList, needCreate, queuePairNumberConfig, err := e.SelectEriFromExist(existENIs, capacity.queuePairCount, capacity.cardCount)
 	if err != nil {
-		return nil, fmt.Errorf("cannot generate ERI config list from existing ENIs: %w", err)
+		return nil, fmt.Errorf("cannot generate eri config list from exist enis: %w", err)
 	}
 	eris, err := e.CreateEriForInstance(ctx, instanceInfo, needCreate, queuePairNumberConfig)
 	if err != nil {
