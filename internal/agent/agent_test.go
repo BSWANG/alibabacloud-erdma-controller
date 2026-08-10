@@ -30,15 +30,15 @@ func (d *retryTestDriver) Name() string { return "retry-test" }
 
 func (d *retryTestDriver) SetERdmaInstallerVersion(string) {}
 
-func immediateBackoff(steps int) wait.Backoff {
-	return wait.Backoff{Steps: steps}
+func immediateBackoff() wait.Backoff {
+	return wait.Backoff{Steps: 3}
 }
 
 func TestProbeDeviceWithRetryEventuallySucceeds(t *testing.T) {
 	linkNotReady := fmt.Errorf("get erdma link failed: %w", drivers.ErrERdmaLinkNotFound)
 	driver := &retryTestDriver{failures: []error{linkNotReady, linkNotReady}}
 
-	device, err := probeDeviceWithRetry(context.Background(), driver, &types.ERI{ID: "eni-test"}, immediateBackoff(3))
+	device, err := probeDeviceWithRetry(context.Background(), driver, &types.ERI{ID: "eni-test"}, immediateBackoff())
 	if err != nil {
 		t.Fatalf("probeDeviceWithRetry() error = %v", err)
 	}
@@ -54,7 +54,7 @@ func TestProbeDeviceWithRetryStopsOnPermanentError(t *testing.T) {
 	permanentErr := errors.New("invalid device configuration")
 	driver := &retryTestDriver{failures: []error{permanentErr}}
 
-	_, err := probeDeviceWithRetry(context.Background(), driver, &types.ERI{ID: "eni-test"}, immediateBackoff(3))
+	_, err := probeDeviceWithRetry(context.Background(), driver, &types.ERI{ID: "eni-test"}, immediateBackoff())
 	if !errors.Is(err, permanentErr) {
 		t.Fatalf("probeDeviceWithRetry() error = %v, want %v", err, permanentErr)
 	}
@@ -67,7 +67,7 @@ func TestProbeDeviceWithRetryReturnsLastTransientError(t *testing.T) {
 	linkNotReady := fmt.Errorf("get erdma link failed: %w", drivers.ErrERdmaLinkNotFound)
 	driver := &retryTestDriver{failures: []error{linkNotReady, linkNotReady, linkNotReady}}
 
-	_, err := probeDeviceWithRetry(context.Background(), driver, &types.ERI{ID: "eni-test"}, immediateBackoff(3))
+	_, err := probeDeviceWithRetry(context.Background(), driver, &types.ERI{ID: "eni-test"}, immediateBackoff())
 	if !errors.Is(err, drivers.ErrERdmaLinkNotFound) {
 		t.Fatalf("probeDeviceWithRetry() error = %v, want ErrERdmaLinkNotFound", err)
 	}
@@ -81,7 +81,7 @@ func TestProbeDeviceWithRetryHonorsCancellation(t *testing.T) {
 	cancel()
 	driver := &retryTestDriver{}
 
-	_, err := probeDeviceWithRetry(ctx, driver, &types.ERI{ID: "eni-test"}, immediateBackoff(3))
+	_, err := probeDeviceWithRetry(ctx, driver, &types.ERI{ID: "eni-test"}, immediateBackoff())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("probeDeviceWithRetry() error = %v, want context.Canceled", err)
 	}

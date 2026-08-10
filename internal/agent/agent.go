@@ -103,7 +103,7 @@ func probeDeviceWithRetry(ctx context.Context, driver drivers.ERdmaDriver, eri *
 		}
 		return false, nil
 	})
-	if errors.Is(err, wait.ErrWaitTimeout) && lastErr != nil {
+	if wait.Interrupted(err) && lastErr != nil {
 		return nil, fmt.Errorf("erdma link did not become ready after %d attempts: %w", attempts, lastErr)
 	}
 	if err != nil {

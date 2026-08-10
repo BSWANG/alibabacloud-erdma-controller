@@ -19,8 +19,9 @@ package client
 import (
 	"context"
 	"errors"
-	"github.com/alibabacloud-go/tea/tea"
 	"testing"
+
+	"github.com/alibabacloud-go/tea/tea"
 
 	ecs "github.com/alibabacloud-go/ecs-20140526/v4/client"
 	"golang.org/x/time/rate"

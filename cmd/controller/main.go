@@ -19,9 +19,10 @@ package main
 import (
 	"context"
 	"flag"
+	"os"
+
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
-	"os"
 
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/cert"
 
