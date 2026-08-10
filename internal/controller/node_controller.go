@@ -2,14 +2,16 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"sync"
 	"time"
 
+	aliyunclient "github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/aliyun/client"
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/types"
 	"github.com/go-logr/logr"
 	"github.com/samber/lo"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -29,15 +31,18 @@ import (
 )
 
 const (
-	erdmaFinalizer = "network.alibabacloud.com/erdma-controller"
+	erdmaFinalizer           = "network.alibabacloud.com/erdma-controller"
+	nodeNotReadyRequeueAfter = 30 * time.Second
 )
 
 // NodeReconciler reconciles a ERdmaDevice object
 type NodeReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	EriClient  *EriClient
-	CtrlConfig *types.Config
+	APIReader               client.Reader
+	Scheme                  *runtime.Scheme
+	EriClient               *EriClient
+	CtrlConfig              *types.Config
+	MaxConcurrentReconciles int
 
 	// taggedENIs tracks which ENIs have already been backfilled with the
 	// terway-compat tags during this controller process lifetime, so that
@@ -49,6 +54,7 @@ type NodeReconciler struct {
 // +kubebuilder:rbac:groups=network.alibabacloud.com,resources=erdmadevices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=network.alibabacloud.com,resources=erdmadevices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=network.alibabacloud.com,resources=erdmadevices/finalizers,verbs=update
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -71,119 +77,123 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		erdmaLogger.Error(err, "Failed to get node")
 		return ctrl.Result{}, err
 	}
+	if !r.OwnNode(&node) {
+		return ctrl.Result{}, nil
+	}
 	if !node.GetDeletionTimestamp().IsZero() {
 		return RemoveERdmaDevices(r.Client, ctx, req.Name)
 	}
+	existingDevice := &networkv1.ERdmaDevice{}
+	err = r.Client.Get(ctx, client.ObjectKey{Name: node.Name}, existingDevice)
+	deviceExists := err == nil
+	if err != nil && !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
 	if !isNodeReady(&node) {
-		timeout := time.Duration(r.CtrlConfig.WaitNodeReadyTimeoutSeconds) * time.Second
-		elapsed := time.Since(node.CreationTimestamp.Time)
-		if elapsed < timeout {
-			erdmaLogger.Info("Node is not ready, waiting", "node", req.Name, "elapsed", elapsed)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		leaseReady, err := r.hasFreshNodeLease(ctx, &node, time.Now())
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-		erdmaLogger.Info("Node is not ready but timeout exceeded, proceeding", "node", req.Name, "elapsed", elapsed)
+		if leaseReady {
+			erdmaLogger.Info("Node lease is active, proceeding before node is ready", "node", req.Name)
+		} else {
+			timeout := time.Duration(r.CtrlConfig.WaitNodeReadyTimeoutSeconds) * time.Second
+			elapsed := time.Since(node.CreationTimestamp.Time)
+			if elapsed < timeout {
+				erdmaLogger.Info("Node is not ready, waiting", "node", req.Name, "elapsed", elapsed)
+				return ctrl.Result{RequeueAfter: nodeNotReadyRequeueAfter}, nil
+			}
+			erdmaLogger.Info("Node is not ready but timeout exceeded, proceeding", "node", req.Name, "elapsed", elapsed)
+		}
 	}
 
 	erdmaLogger.WithValues("node", req).Info("Node Added")
-
-	instanceID, err := r.EriClient.InstanceIDFromNode(&node)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	erdmaDevices := networkv1.ERdmaDeviceList{}
-	err = r.Client.List(ctx, &erdmaDevices, client.MatchingLabels{
-		"alibabacloud.com/instance-id": instanceID,
-	})
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if len(erdmaDevices.Items) == 0 {
-		eri, err := r.EriClient.SelectERIs(instanceID)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if eri == nil {
-			erdmaLogger.Info("node not support erdma", "name", node.Name, "instance-id", instanceID)
-			return ctrl.Result{}, nil
-		}
-		jumboFrame, err := r.EriClient.IsJumboFrameEnabled(instanceID)
-		if err != nil {
-			erdmaLogger.Error(err, "failed to check jumbo frame status, defaulting to false")
-			jumboFrame = false
-		}
-		erdmaDevice := networkv1.ERdmaDevice{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: node.Name,
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion: node.APIVersion,
-						Kind:       node.Kind,
-						Name:       node.Name,
-						UID:        node.UID,
-					},
-				},
-				Labels: map[string]string{
-					"alibabacloud.com/instance-id": instanceID,
-					"alibabacloud.com/nodename":    node.Name,
-				},
-			},
-			Spec: networkv1.ERdmaDeviceSpec{
-				JumboFrame: jumboFrame,
-				Devices: lo.Map(eri, func(item *types.ERI, index int) networkv1.DeviceInfo {
-					return networkv1.DeviceInfo{
-						InstanceID:       item.InstanceID,
-						MAC:              item.MAC,
-						IsPrimaryENI:     item.IsPrimaryENI,
-						ID:               item.ID,
-						NetworkCardIndex: item.CardIndex,
-						QueuePair:        item.QueuePair,
-					}
-				}),
-			},
-		}
-		err = r.Client.Create(ctx, &erdmaDevice)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		_ = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-			dev := &networkv1.ERdmaDevice{}
-			err := r.Client.Get(ctx, k8stypes.NamespacedName{
-				Name: erdmaDevice.Name,
-			}, dev)
-			if err != nil {
-				return false, nil
-			}
-			return true, nil
-		})
-
+	if deviceExists {
+		// Existing ERdmaDevice CR path: backfill terway-compat tags once per
+		// controller lifetime so old nodes provisioned before this feature also
+		// stop conflicting with terway.
+		instanceID := existingDevice.Labels["alibabacloud.com/instance-id"]
+		r.backfillEriTags(ctx, []networkv1.ERdmaDevice{*existingDevice}, instanceID, erdmaLogger)
 		return ctrl.Result{}, nil
 	}
 
-	// Existing ERdmaDevice CR path: backfill terway-compat tags once per
-	// controller lifetime so old nodes provisioned before this feature also
-	// stop conflicting with terway.
-	r.backfillEriTags(erdmaDevices.Items, instanceID, erdmaLogger)
+	instanceInfo, err := r.EriClient.InstanceFromNode(ctx, &node)
+	if err != nil {
+		return requeueOnECSThrottling(err, erdmaLogger)
+	}
+	instanceID := *instanceInfo.InstanceId
+	eri, err := r.EriClient.SelectERIs(ctx, instanceInfo)
+	if err != nil {
+		return requeueOnECSThrottling(err, erdmaLogger)
+	}
+	if eri == nil {
+		erdmaLogger.Info("node not support erdma", "name", node.Name, "instance-id", instanceID)
+		return ctrl.Result{}, nil
+	}
+	jumboFrame, err := r.EriClient.IsJumboFrameEnabled(ctx, instanceID)
+	if err != nil {
+		var throttlingErr *aliyunclient.ThrottlingError
+		if stderrors.As(err, &throttlingErr) {
+			return requeueOnECSThrottling(err, erdmaLogger)
+		}
+		erdmaLogger.Error(err, "failed to check jumbo frame status, defaulting to false")
+		jumboFrame = false
+	}
+	erdmaDevice := networkv1.ERdmaDevice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: node.Name,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: node.APIVersion,
+					Kind:       node.Kind,
+					Name:       node.Name,
+					UID:        node.UID,
+				},
+			},
+			Labels: map[string]string{
+				"alibabacloud.com/instance-id": instanceID,
+				"alibabacloud.com/nodename":    node.Name,
+			},
+		},
+		Spec: networkv1.ERdmaDeviceSpec{
+			JumboFrame: jumboFrame,
+			Devices: lo.Map(eri, func(item *types.ERI, index int) networkv1.DeviceInfo {
+				return networkv1.DeviceInfo{
+					InstanceID:       item.InstanceID,
+					MAC:              item.MAC,
+					IsPrimaryENI:     item.IsPrimaryENI,
+					ID:               item.ID,
+					NetworkCardIndex: item.CardIndex,
+					QueuePair:        item.QueuePair,
+				}
+			}),
+		},
+	}
+	err = r.Client.Create(ctx, &erdmaDevice)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
 
-func (r *NodeReconciler) backfillEriTags(devices []networkv1.ERdmaDevice, instanceID string, logger logr.Logger) {
+func (r *NodeReconciler) backfillEriTags(ctx context.Context, devices []networkv1.ERdmaDevice, instanceID string, logger logr.Logger) {
 	var pending []string
 	for _, dev := range devices {
-		for _, d := range dev.Spec.Devices {
-			if d.ID == "" {
+		for _, device := range dev.Spec.Devices {
+			if device.ID == "" {
 				continue
 			}
-			if _, loaded := r.taggedENIs.LoadOrStore(d.ID, struct{}{}); loaded {
+			if _, loaded := r.taggedENIs.LoadOrStore(device.ID, struct{}{}); loaded {
 				continue
 			}
-			pending = append(pending, d.ID)
+			pending = append(pending, device.ID)
 		}
 	}
 	if len(pending) == 0 {
 		return
 	}
-	if err := r.EriClient.EnsureEriTags(pending, instanceID); err != nil {
+	if err := r.EriClient.EnsureEriTags(ctx, pending, instanceID); err != nil {
 		// Roll back the in-memory marker so the next reconcile retries.
 		for _, id := range pending {
 			r.taggedENIs.Delete(id)
@@ -209,24 +219,22 @@ func RemoveERdmaDevices(erdmaClient client.Client, ctx context.Context, nodeName
 	if len(erdmaDevices.Items) == 0 {
 		return ctrl.Result{}, nil
 	}
-	// todo remove erdma device
-	for _, device := range erdmaDevices.Items {
-		device.Finalizers = []string{}
-		controllerutil.RemoveFinalizer(&device, erdmaFinalizer)
-
-		update := device.DeepCopy()
-		_, err := controllerutil.CreateOrPatch(ctx, erdmaClient, update, func() error {
-			update.ObjectMeta = device.ObjectMeta
-			return nil
-		})
-		if err != nil {
+	// Object deletion after the List is already the desired result.
+	for i := range erdmaDevices.Items {
+		device := &erdmaDevices.Items[i]
+		if !controllerutil.ContainsFinalizer(device, erdmaFinalizer) {
+			continue
+		}
+		base := device.DeepCopy()
+		controllerutil.RemoveFinalizer(device, erdmaFinalizer)
+		if err := erdmaClient.Patch(ctx, device, client.MergeFrom(base)); err != nil && !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
 	}
 
-	for _, erdmaDevice := range erdmaDevices.Items {
-		err := erdmaClient.Delete(ctx, &erdmaDevice)
-		if err != nil {
+	for i := range erdmaDevices.Items {
+		err := erdmaClient.Delete(ctx, &erdmaDevices.Items[i])
+		if err != nil && !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
 	}
@@ -240,6 +248,39 @@ func isNodeReady(node *v1.Node) bool {
 		}
 	}
 	return false
+}
+
+func (r *NodeReconciler) hasFreshNodeLease(ctx context.Context, node *v1.Node, now time.Time) (bool, error) {
+	lease := &coordinationv1.Lease{}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := reader.Get(ctx, client.ObjectKey{Namespace: v1.NamespaceNodeLease, Name: node.Name}, lease)
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !isFreshNodeLease(lease, now) {
+		return false, nil
+	}
+	return lo.SomeBy(lease.OwnerReferences, func(ref metav1.OwnerReference) bool {
+		return ref.Kind == "Node" && ref.UID == node.UID
+	}), nil
+}
+
+func isFreshNodeLease(lease *coordinationv1.Lease, now time.Time) bool {
+	if lease == nil || lease.Namespace != v1.NamespaceNodeLease ||
+		lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != lease.Name ||
+		lease.Spec.RenewTime == nil || lease.Spec.LeaseDurationSeconds == nil ||
+		*lease.Spec.LeaseDurationSeconds <= 0 {
+		return false
+	}
+
+	expiresAt := lease.Spec.RenewTime.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second)
+	return now.Before(expiresAt)
 }
 
 func (r *NodeReconciler) OwnNode(node *v1.Node) bool {
@@ -275,7 +316,8 @@ func (r *NodeReconciler) PredictNodeUpdate(oldNode, newNode *v1.Node) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	pred := predicate.TypedFuncs[*v1.Node]{
+	r.APIReader = mgr.GetAPIReader()
+	nodePred := predicate.TypedFuncs[*v1.Node]{
 		CreateFunc: func(e event.TypedCreateEvent[*v1.Node]) bool {
 			return r.OwnNode(e.Object)
 		},
@@ -289,9 +331,37 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return r.OwnNode(e.Object)
 		},
 	}
-	c, err := controller.New("node-controller", mgr, controller.Options{Reconciler: r})
+	c, err := controller.New("node-controller", mgr, controller.Options{
+		Reconciler:              r,
+		MaxConcurrentReconciles: r.MaxConcurrentReconciles,
+	})
 	if err != nil {
 		return err
 	}
-	return c.Watch(source.Kind(mgr.GetCache(), &v1.Node{}, &handler.TypedEnqueueRequestForObject[*v1.Node]{}, pred))
+	if err := c.Watch(source.Kind(mgr.GetCache(), &v1.Node{}, &handler.TypedEnqueueRequestForObject[*v1.Node]{}, nodePred)); err != nil {
+		return err
+	}
+
+	leasePred := predicate.TypedFuncs[*coordinationv1.Lease]{
+		CreateFunc: func(e event.TypedCreateEvent[*coordinationv1.Lease]) bool {
+			return isFreshNodeLease(e.Object, time.Now())
+		},
+		UpdateFunc: func(e event.TypedUpdateEvent[*coordinationv1.Lease]) bool {
+			now := time.Now()
+			return !isFreshNodeLease(e.ObjectOld, now) && isFreshNodeLease(e.ObjectNew, now)
+		},
+		DeleteFunc: func(event.TypedDeleteEvent[*coordinationv1.Lease]) bool {
+			return false
+		},
+		GenericFunc: func(event.TypedGenericEvent[*coordinationv1.Lease]) bool {
+			return false
+		},
+	}
+	leaseToNode := handler.TypedEnqueueRequestsFromMapFunc(func(_ context.Context, lease *coordinationv1.Lease) []ctrl.Request {
+		if lease.Namespace != v1.NamespaceNodeLease {
+			return nil
+		}
+		return []ctrl.Request{{NamespacedName: k8stypes.NamespacedName{Name: lease.Name}}}
+	})
+	return c.Watch(source.Kind(mgr.GetCache(), &coordinationv1.Lease{}, leaseToNode, leasePred))
 }

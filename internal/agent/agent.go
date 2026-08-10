@@ -1,18 +1,22 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/deviceplugin"
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/drivers"
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/k8s"
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/types"
 	"github.com/samber/lo"
+	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	networkv1 "github.com/AliyunContainerService/alibabacloud-erdma-controller/api/v1"
@@ -21,6 +25,13 @@ import (
 var (
 	agentLog = ctrl.Log.WithName("Agent")
 )
+
+// RDMA links can appear after their network devices.
+var deviceProbeBackoff = wait.Backoff{
+	Duration: 2 * time.Second,
+	Factor:   1,
+	Steps:    91,
+}
 
 type Agent struct {
 	kubernetes           k8s.Kubernetes
@@ -72,6 +83,38 @@ func NewAgent(preferDriver string, allocAllDevice bool, devicepluginPreStart boo
 	}, nil
 }
 
+func probeDeviceWithRetry(ctx context.Context, driver drivers.ERdmaDriver, eri *types.ERI, backoff wait.Backoff) (*types.ERdmaDeviceInfo, error) {
+	var (
+		deviceInfo *types.ERdmaDeviceInfo
+		lastErr    error
+		attempts   int
+	)
+	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
+		attempts++
+		deviceInfo, lastErr = driver.ProbeDevice(eri)
+		if lastErr == nil {
+			return true, nil
+		}
+		if !errors.Is(lastErr, drivers.ErrERdmaLinkNotFound) {
+			return false, lastErr
+		}
+		if attempts == 1 || attempts%15 == 0 {
+			agentLog.Info("erdma link is not ready, retrying", "eri", eri.ID, "attempt", attempts, "error", lastErr)
+		}
+		return false, nil
+	})
+	if wait.Interrupted(err) && lastErr != nil {
+		return nil, fmt.Errorf("erdma link did not become ready after %d attempts: %w", attempts, lastErr)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if attempts > 1 {
+		agentLog.Info("erdma link became ready", "eri", eri.ID, "attempts", attempts)
+	}
+	return deviceInfo, nil
+}
+
 func (a *Agent) Run() error {
 	go stackTriger()
 	var err error
@@ -115,7 +158,7 @@ func (a *Agent) Run() error {
 	}
 	erdmaDevices := make([]*types.ERdmaDeviceInfo, 0)
 	for _, eriInfo := range eriInfos.Spec.Devices {
-		deviceInfo, err := a.driver.ProbeDevice(&types.ERI{
+		deviceInfo, err := probeDeviceWithRetry(context.Background(), a.driver, &types.ERI{
 			ID:            eriInfo.ID,
 			IsPrimaryENI:  eriInfo.IsPrimaryENI,
 			MAC:           eriInfo.MAC,
@@ -123,9 +166,9 @@ func (a *Agent) Run() error {
 			CardIndex:     eriInfo.NetworkCardIndex,
 			JumboFrame:    eriInfos.Spec.JumboFrame,
 			JumboFrameMTU: a.jumboFrameMTU,
-		})
+		}, deviceProbeBackoff)
 		if err != nil {
-			return fmt.Errorf("probe device failed, err: %v", err)
+			return fmt.Errorf("probe device failed, err: %w", err)
 		}
 		erdmaDevices = append(erdmaDevices, deviceInfo)
 	}

@@ -21,6 +21,9 @@ import (
 	"flag"
 	"os"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/cert"
 
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/config"
@@ -36,6 +39,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -93,7 +97,6 @@ func main() {
 
 	restConfig := ctrl.GetConfigOrDie()
 	restConfig.UserAgent = consts.UA
-
 	directClient, err := client.New(restConfig, client.Options{Scheme: scheme})
 	if err != nil {
 		setupLog.Error(err, "unable to init k8s client")
@@ -129,8 +132,17 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme: scheme,
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&coordinationv1.Lease{}: {
+					Namespaces: map[string]cache.Config{
+						corev1.NamespaceNodeLease: {},
+					},
+				},
+			},
+		},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -160,19 +172,21 @@ func main() {
 	}
 
 	if err = (&controller.ERdmaDeviceReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		EriClient: eriClient,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		EriClient:               eriClient,
+		MaxConcurrentReconciles: config.GetConfig().ERdmaDeviceMaxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ERdmaDevice")
 		os.Exit(1)
 	}
 
 	if err = (&controller.NodeReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		EriClient:  eriClient,
-		CtrlConfig: config.GetConfig(),
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		EriClient:               eriClient,
+		CtrlConfig:              config.GetConfig(),
+		MaxConcurrentReconciles: config.GetConfig().NodeMaxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Node")
 		os.Exit(1)

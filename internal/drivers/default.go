@@ -60,7 +60,7 @@ func (d *DefaultDriver) ProbeDevice(eri *types.ERI) (*types.ERdmaDeviceInfo, err
 			}
 			rdmaLink, err := GetERdmaFromLink(link)
 			if err != nil {
-				return nil, fmt.Errorf("get erdma link failed: %v", err)
+				return nil, fmt.Errorf("get erdma link failed: %w", err)
 			}
 
 			devPaths, err := GetERdmaDevPathsFromRdmaLink(rdmaLink)

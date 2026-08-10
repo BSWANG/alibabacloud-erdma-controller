@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/AliyunContainerService/alibabacloud-erdma-controller/internal/types"
@@ -15,6 +16,9 @@ const (
 var (
 	driverLog = ctrl.Log.WithName("Driver")
 )
+
+// ErrERdmaLinkNotFound identifies a delayed RDMA link.
+var ErrERdmaLinkNotFound = errors.New("cannot found rdma link")
 
 type ERdmaDriver interface {
 	Install() error

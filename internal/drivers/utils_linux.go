@@ -216,7 +216,7 @@ func GetERdmaFromLink(link netlink.Link) (*netlink.RdmaLink, error) {
 			return rl, nil
 		}
 	}
-	return nil, fmt.Errorf("cannot found rdma link for %s", link.Attrs().Name)
+	return nil, fmt.Errorf("%w for %s", ErrERdmaLinkNotFound, link.Attrs().Name)
 }
 
 func parseERdmaLinkHwAddr(guid string) (net.HardwareAddr, error) {

@@ -4,6 +4,7 @@
 package controller_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/samber/lo"
@@ -19,8 +20,8 @@ func TestEnsureEriTagsEmptyInputIsNoop(t *testing.T) {
 	// there is nothing to tag. Guards against accidentally calling the
 	// OpenAPI for empty ENI lists (which the ECS server rejects).
 	e := &controller.EriClient{}
-	assert.NoError(t, e.EnsureEriTags(nil, "i-xxx"))
-	assert.NoError(t, e.EnsureEriTags([]string{}, ""))
+	assert.NoError(t, e.EnsureEriTags(context.Background(), nil, "i-xxx"))
+	assert.NoError(t, e.EnsureEriTags(context.Background(), []string{}, ""))
 }
 
 func TestSelectEriFromExist(t *testing.T) {

@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	networkv1 "github.com/AliyunContainerService/alibabacloud-erdma-controller/api/v1"
@@ -34,8 +35,9 @@ import (
 // ERdmaDeviceReconciler reconciles a ERdmaDevice object
 type ERdmaDeviceReconciler struct {
 	client.Client
-	Scheme    *runtime.Scheme
-	EriClient *EriClient
+	Scheme                  *runtime.Scheme
+	EriClient               *EriClient
+	MaxConcurrentReconciles int
 }
 
 // +kubebuilder:rbac:groups=network.alibabacloud.com,resources=erdmadevices,verbs=get;list;watch;create;update;patch;delete
@@ -77,9 +79,9 @@ func (r *ERdmaDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	eriStatus, err := r.EriClient.EnsureEriForInstance(device.Spec.Devices)
+	eriStatus, err := r.EriClient.EnsureEriForInstance(ctx, device.Spec.Devices)
 	if err != nil {
-		return ctrl.Result{}, err
+		return requeueOnECSThrottling(err, erdmaLogger)
 	}
 	device.Status.Devices = eriStatus
 	err = r.Client.Status().Update(ctx, &device)
@@ -98,5 +100,8 @@ func (r *ERdmaDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 func (r *ERdmaDeviceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1.ERdmaDevice{}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: r.MaxConcurrentReconciles,
+		}).
 		Complete(r)
 }

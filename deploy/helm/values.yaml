@@ -66,6 +66,20 @@ config:
   enableInitContainerInject: true
   smcInitImage: ""
   localERIDiscovery: false
+  # Concurrent Node reconciles create ERIs through ECS OpenAPI. Defaults to 10 when omitted or zero.
+  nodeMaxConcurrentReconciles: 10
+  # Concurrent ERdmaDevice reconciles attach and configure ERIs. Defaults to 20 when omitted or zero.
+  erdmaDeviceMaxConcurrentReconciles: 20
+  # ECS OpenAPI requests per minute.
+  rateLimit:
+    DescribeInstances: 500
+    DescribeNetworkInterfaces: 1000
+    CreateNetworkInterface: 250
+    ModifyNetworkInterfaceAttribute: 500
+    TagResources: 500
+    DescribeInstanceTypes: 200
+    AttachNetworkInterface: 250
+    DescribeInstanceAttribute: 1000
 
 credentials:
   type: ""
