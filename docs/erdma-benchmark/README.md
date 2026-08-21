@@ -210,6 +210,36 @@ mpirun --allow-run-as-root -np 2 -H <IPA>:1,<IPB>:1 \
 
 ---
 
+## 八、Mooncake Transfer Engine / TENT（跨节点 DRAM 传输）
+
+同套 eRDMA 环境可验证 Mooncake 新一代运行时 **TENT**（Transfer Engine NEXT）。
+注意：官方 PyPI wheel / `kvcacheai/mooncake` 镜像均 **未启用 `-DUSE_TENT=ON`**，需源码编译出 `tebench`。
+
+```bash
+cd docs/erdma-benchmark
+kubectl apply -f tent-pods.yaml
+kubectl wait --for=condition=Ready pod -l app=tent-test --timeout=360s
+./tent-bench.sh          # perftest 基线 + tebench(tent) + tebench(classic) + 数据一致性
+```
+
+- `mooncake-tent/Dockerfile`：USE_TENT=ON 全流程镜像构建参考（本 runbook 实际用集群内编译 + `bin/tebench` 注入 nccl-slim pod 的方式）。
+- **必须 compat 模式**：erdma-controller agent 用 `preferDriver: "compat"`（`compat_mode=Y`）。
+  默认模式（compat_mode=N）GID 表只有 RoCE v1 的 MAC GID，没有 RoCEv2 IPv4-mapped GID，
+  TENT/perftest 的 GID 自动发现会失败（报 `Failed to modify QP to RTS`）。
+- classic backend p2p 模式段名硬编码 hostname：initiator pod 需在 /etc/hosts 解析 target pod 名（脚本已自动处理）。
+
+参考结果（2× ecs.c8i.2xlarge，单 eRDMA 网卡，compat_mode=Y）：
+
+| 测试 | 结果 |
+|------|------|
+| perftest ib_write_bw | 15.55 Gb/s（该机型网卡上限）|
+| tebench TENT 单线程 | 1.94 GB/s（打满链路，与 perftest 一致）|
+| tebench TENT 8 线程 | ~1.95–2.1 GB/s |
+| tebench classic 对照 | 同量级（单线程 1.94 GB/s）|
+| TENT write_seed/read_verify | 全部通过，无数据错误 |
+
+---
+
 ## 文件清单
 
 | 文件 | 用途 |
@@ -220,3 +250,6 @@ mpirun --allow-run-as-root -np 2 -H <IPA>:1,<IPB>:1 \
 | [`nccl-pods.yaml`](./nccl-pods.yaml) | NCCL 测试 2-pod（privileged + GPU + erdma）|
 | [`nccl-graph.xml`](./nccl-graph.xml) | 双网卡自定义 NCCL 拓扑图 |
 | [`nccl-bench.sh`](./nccl-bench.sh) | 一键驱动：SSH 互信 + 单/双网卡三组测试 |
+| [`tent-pods.yaml`](./tent-pods.yaml) | Mooncake TE/TENT 测试 2-pod（erdma 设备插件）|
+| [`tent-bench.sh`](./tent-bench.sh) | TENT/classic 对照压测 + perftest 基线 + 一致性校验 |
+| [`mooncake-tent/`](./mooncake-tent) | USE_TENT=ON 编译参考（Dockerfile）|

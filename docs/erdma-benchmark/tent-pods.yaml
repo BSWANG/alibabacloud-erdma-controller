@@ -1,0 +1,41 @@
+# Mooncake Transfer Engine / TENT over eRDMA 跨节点测试 pod x2
+#
+# 说明:
+# - aliyun/erdma: "1" 走 eRDMA 设备插件, 由 erdma-controller 自动 attach eRDMA ERI.
+# - podAntiAffinity 自动分到 2 个不同节点.
+# - 复用 nccl-slim 镜像(自带 rdma-core/perftest), tebench/transfer_engine_bench
+#   二进制由 tent-bench.sh 注入 (源码编译见 mooncake-tent/, -DUSE_TENT=ON, CPU-only).
+#
+#   kubectl apply -f tent-pods.yaml
+#   kubectl wait --for=condition=Ready pod -l app=tent-test --timeout=360s
+#   ./tent-bench.sh
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tent-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: tent-test}
+  template:
+    metadata:
+      labels: {app: tent-test}
+    spec:
+      nodeSelector:
+        aliyun.accelerator/erdma: "true"
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {app: tent-test}
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: tent
+          image: registry.cn-hangzhou.aliyuncs.com/wangbs/erdma:nccl-slim
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          securityContext:
+            privileged: true
+          resources:
+            limits:
+              aliyun/erdma: "1"
